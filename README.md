@@ -1,79 +1,86 @@
-# Figure Skating Judge Papers Generator (Azure Function)
+# Figure Skating Judge Papers Generator
 
-This project automates the creation of judging packets for figure skating competitions using a serverless Azure Function. It processes raw PDF exports (Start Lists, Judges Sheets, Panel info) stored in Azure Blob Storage and compiles them into personalized PDF files for each judge, referee, and technical official.
+A web application for generating judging packets for figure skating competitions. Users upload PDF exports from Figure Skating Manager (FSM), and the system automatically splits, categorizes, and merges them into personalized PDF packets for each judge, referee, and technical official.
 
 ## Architecture
 
-1.  **Input**: Source PDF files are uploaded to a folder within an Azure Blob Storage container (`fs-judgepapers`).
-2.  **Processing**: An Azure Function (`generate_judging_papers`) is triggered via HTTP. It downloads the files, processes them (splitting, cover page generation, merging), and generates the packets.
-3.  **Output**: The resulting PDF packets are uploaded back to the same Blob Storage container under a `judgePapers/` subfolder.
+| Layer | Technology |
+|---|---|
+| **Frontend** | TypeScript + Vite, served by Node.js proxy server |
+| **Backend** | Python Azure Functions (HTTP triggers), pypdf & reportlab |
+| **Auth** | Microsoft Entra ID via Azure App Service Easy Auth |
+| **Storage** | Azure Blob Storage (PDFs) + Azure Table Storage (metadata) |
+| **Infrastructure** | Azure Bicep (subscription-scoped) |
+
+### How It Works
+
+1. **Upload** — Source PDF files are uploaded via the web UI to Azure Blob Storage
+2. **Process** — Azure Function splits judge sheets, creates cover pages, and merges documents into per-judge packets
+3. **Download** — Generated packets are stored in Blob Storage with SAS-linked download URLs
 
 ## Features
 
-- **Serverless Processing**: Runs on Azure Functions (Python v2 model).
-- **Managed Identity**: Uses Azure Managed Identity for secure access to Blob Storage.
-- **PDF Manipulation**: Splits large judge sheets, generates custom cover pages, and merges documents.
-- **Daily Summaries**: Aggregates individual packets into daily master files.
+- **PDF Processing Pipeline** — Split → Categorize → Cover pages → Merge → ZIP
+- **Multi-language UI** — Finnish (default) and English
+- **Category Management** — Categories loaded from Azure Table Storage (IJS/MUPI judging methods)
+- **Competition Workflow** — List, create, upload PDFs, generate and download judging packets
+- **Serverless & Secure** — Azure Functions with Managed Identity for storage access
+
+## Branch Strategy
+
+| Branch | Environment | Purpose |
+|---|---|---|
+| `dev` | Development | Active development, feature branches merge here |
+| `test` | Test | Staging/QA, promoted from dev via PR |
+| `main` | Production | Stable releases, promoted from test via PR |
 
 ## Prerequisites
 
-- **Azure Subscription**
-- **Azure CLI**
-- **Azure Functions Core Tools**
-- **Python 3.10+**
+- Azure Subscription
+- Azure CLI
+- Azure Functions Core Tools
+- Python 3.10+
+- Node.js 18+
 
 ## Deployment
 
-### 1. Infrastructure (Bicep)
-
-Deploy the Azure resources (Storage Account, Function App, Application Insights) using the provided Bicep files.
+### 1. Infrastructure
 
 ```bash
-cd infra
-az deployment sub create --location swedencentral --template-file main.bicep
+./deploy_infra.sh --client-id <ENTRA_CLIENT_ID> --client-secret <ENTRA_CLIENT_SECRET>
 ```
 
-### 2. Function Code
+Deploys Azure resources (Resource Group, Storage Account, Function App, Web App, Application Insights, RBAC) using Bicep.
 
-Deploy the Python function code to the created Function App.
+### 2. Backend
 
 ```bash
-cd infra/functions
-func azure functionapp publish <function-app-name>
+./deploy_backend.sh -g <resource-group>
 ```
 
-*Note: Replace `<function-app-name>` with the name outputted by the Bicep deployment.*
+Packages and deploys the Python Azure Functions via ZIP deployment.
 
-## Usage
+### 3. Frontend
 
-1.  **Upload Source Files**:
-    Upload your competition PDF files to the `fs-judgepapers` container in your Storage Account. Place them in a specific folder (e.g., `competition-2026`).
-    
-    Required files per segment:
-    - `*_ISUPanelofJudgesandTechnicalPanel.pdf`
-    - `*_StartListwithTimes.pdf`
-    - `*_JudgesSheetAll.pdf`
-    - Role-specific files (`*_RefereeSheet.pdf`, `*_TechnicalControllerSheet.pdf`, etc.)
+```bash
+./deploy_frontend.sh -g <resource-group>
+```
 
-2.  **Trigger the Function**:
-    Send an HTTP POST request to your Function App URL.
-
-    **URL**: `https://<function-app-name>.azurewebsites.net/api/generate_judging_papers`
-    
-    **Body**:
-    ```json
-    {
-        "workingFolder": "competition-2026"
-    }
-    ```
-
-3.  **Retrieve Results**:
-    Once the function completes (returns 200 OK), check the `fs-judgepapers` container. You will find the generated PDFs in `competition-2026/judgePapers/`.
+Builds the Vite frontend, bundles with the Node.js server, and deploys to Azure Web App.
 
 ## Local Development
 
-1.  **Configure Settings**:
-    Create `infra/functions/local.settings.json`:
+### Quick Start
+
+```bash
+./start_locally.sh
+```
+
+This starts the Azure Functions backend, the Vite dev server, and SWA CLI for local auth emulation.
+
+### Manual Setup
+
+1. **Configure local settings** — Create `infra/functions/local.settings.json`:
     ```json
     {
       "IsEncrypted": false,
@@ -83,17 +90,41 @@ func azure functionapp publish <function-app-name>
       }
     }
     ```
-    *Note: For local development, a connection string is required as Managed Identity works only in Azure.*
 
-2.  **Install Dependencies**:
+2. **Backend:**
     ```bash
     cd infra/functions
     python -m venv .venv
     source .venv/bin/activate
     pip install -r requirements.txt
-    ```
-
-3.  **Run Locally**:
-    ```bash
     func start
     ```
+
+3. **Frontend:**
+    ```bash
+    cd frontend
+    npm install
+    npm run dev
+    ```
+
+## Project Structure
+
+```
+├── frontend/              # TypeScript + Vite web application
+│   ├── src/               # Frontend source code
+│   ├── server.js          # Node.js proxy server for production
+│   └── vite.config.ts     # Vite configuration
+├── infra/
+│   ├── main.bicep         # Infrastructure-as-Code (subscription-scoped)
+│   ├── modules/           # Bicep modules (storage, function, webapp, RBAC)
+│   └── functions/         # Python Azure Functions (backend)
+├── backend_build/         # Backend build artifacts
+├── deploy_infra.sh        # Infrastructure deployment script
+├── deploy_backend.sh      # Backend deployment script
+├── deploy_frontend.sh     # Frontend deployment script
+└── start_locally.sh       # Local development startup script
+```
+
+## License
+
+See [LICENSE](LICENSE) for details.
