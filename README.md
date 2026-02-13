@@ -47,7 +47,7 @@ A web application for generating judging packets for figure skating competitions
 ### 1. Infrastructure
 
 ```bash
-./deploy_infra.sh --client-id <ENTRA_CLIENT_ID> --client-secret <ENTRA_CLIENT_SECRET>
+./deploy_infra.sh --client-id <ENTRA_CLIENT_ID>
 ```
 
 Deploys Azure resources (Resource Group, Storage Account, Function App, Web App, Application Insights, RBAC) using Bicep.
