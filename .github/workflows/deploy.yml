@@ -74,6 +74,7 @@ jobs:
           echo "authManagedIdentityObjectId=$(echo "$OUTPUT" | jq -r '.authManagedIdentityObjectId.value')" >> "$GITHUB_OUTPUT"
 
       - name: Create federated identity credential on app registration
+        continue-on-error: true
         run: |
           AUTH_APP_OBJECT_ID="${{ secrets.AUTH_APP_OBJECT_ID }}"
           MI_OBJECT_ID="${{ steps.deploy.outputs.authManagedIdentityObjectId }}"
