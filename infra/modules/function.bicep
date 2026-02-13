@@ -6,8 +6,8 @@ param storageAccountName string
 param deploymentContainerUrl string
 param allowedOrigins array = []
 param authClientId string = ''
-@secure()
-param authClientSecret string = ''
+param authManagedIdentityClientId string = ''
+param authManagedIdentityResourceId string = ''
 param tenantId string = ''
 
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
@@ -36,7 +36,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   location: location
   kind: 'functionapp,linux'
   identity: {
-    type: 'SystemAssigned'
+    type: 'SystemAssigned, UserAssigned'
+    userAssignedIdentities: {
+      '${authManagedIdentityResourceId}': {}
+    }
   }
   properties: {
     serverFarmId: appServicePlan.id
@@ -54,8 +57,8 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: appInsights.properties.ConnectionString
         }
         {
-          name: 'MICROSOFT_PROVIDER_AUTHENTICATION_SECRET'
-          value: authClientSecret
+          name: 'OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID'
+          value: authManagedIdentityClientId
         }
       ]
     }
@@ -94,7 +97,7 @@ resource authSettings 'Microsoft.Web/sites/config@2022-03-01' = {
         enabled: !empty(authClientId)
         registration: {
           clientId: authClientId
-          clientSecretSettingName: 'MICROSOFT_PROVIDER_AUTHENTICATION_SECRET'
+          clientSecretSettingName: 'OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID'
           openIdIssuer: '${environment().authentication.loginEndpoint}${tenantId}/v2.0'
         }
         validation: {
