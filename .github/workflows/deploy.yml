@@ -199,7 +199,6 @@ jobs:
         run: |
           RESOURCE_GROUP="${{ needs.deploy-infra.outputs.resource_group_name }}"
           WEBAPP_NAME="${{ needs.deploy-infra.outputs.web_app_name }}"
-          FUNC_HOSTNAME="${{ needs.deploy-infra.outputs.web_app_hostname }}"
           FUNCTION_APP_URL="https://${{ needs.deploy-infra.outputs.function_app_name }}.azurewebsites.net"
 
           az webapp config appsettings set \
