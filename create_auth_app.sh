@@ -94,14 +94,11 @@ else
     echo "ℹ️ Service Principal already exists"
 fi
 
-# 5. Generate Client Secret
-echo "Generating Client Secret..."
-CLIENT_SECRET=$(az ad app credential reset \
-    --id $APP_ID \
-    --display-name "swa-auth-secret" \
-    --years 2 \
-    --query password -o tsv)
-echo "✅ Client Secret generated"
+# 5. Output info for federated credential setup
+# The federated identity credential linking this app registration to the
+# user-assigned managed identity is created automatically by the CI/CD pipeline
+# after the managed identity is provisioned via Bicep.
+# No client secret is needed — Easy Auth uses federated credentials instead.
 
 # 6. Get Tenant ID
 TENANT_ID=$(az account show --query tenantId -o tsv)
@@ -112,12 +109,21 @@ echo "SETUP COMPLETE"
 echo "====================================================="
 echo "App Registration has been configured."
 echo ""
-echo "Client ID: $APP_ID"
-echo "Client Secret: [GENERATED - stored in variable CLIENT_SECRET]"
+echo "Client ID:  $APP_ID"
+echo "Object ID:  $OBJECT_ID"
+echo "Tenant ID:  $TENANT_ID"
+echo ""
+echo "IMPORTANT: No client secret was generated."
+echo "Easy Auth uses federated identity credentials (FIC) with a"
+echo "user-assigned managed identity instead of a client secret."
 echo ""
 echo "NEXT STEPS:"
-echo "1. Run: az staticwebapp appsettings set --name <swa_name> --setting-names AZURE_CLIENT_ID=$APP_ID AZURE_CLIENT_SECRET=<secret>"
-echo "2. Go to Azure Portal > Enterprise Applications > $APP_NAME > Permissions"
-echo "3. Click 'Grant admin consent for <TenantName>'."
-echo "4. (Optional) Go to 'Properties' and set 'Assignment required' to 'Yes' to restrict access."
+echo "1. Deploy infrastructure with Bicep (creates the managed identity)"
+echo "2. The CI/CD pipeline will create the federated identity credential"
+echo "   linking this app registration to the managed identity"
+echo "3. Set AUTH_CLIENT_ID=$APP_ID and AUTH_APP_OBJECT_ID=$OBJECT_ID"
+echo "   in your GitHub Environment secrets"
+echo "4. Go to Azure Portal > Enterprise Applications > $APP_NAME > Permissions"
+echo "5. Click 'Grant admin consent for <TenantName>'."
+echo "6. (Optional) Go to 'Properties' and set 'Assignment required' to 'Yes'"
 echo "====================================================="

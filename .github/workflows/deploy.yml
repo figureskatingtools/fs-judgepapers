@@ -1,0 +1,274 @@
+name: Deploy to Azure
+
+on:
+  push:
+    branches: [main, test, dev]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  set-environment:
+    name: Determine Environment
+    runs-on: ubuntu-latest
+    outputs:
+      env_name: ${{ steps.set-env.outputs.env_name }}
+    steps:
+      - name: Set environment name
+        id: set-env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "env_name=prod" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref }}" == "refs/heads/test" ]]; then
+            echo "env_name=test" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+            echo "env_name=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy-infra:
+    name: Deploy Infrastructure
+    needs: set-environment
+    runs-on: ubuntu-latest
+    environment: ${{ needs.set-environment.outputs.env_name }}
+    outputs:
+      function_app_name: ${{ steps.deploy.outputs.functionAppName }}
+      web_app_name: ${{ steps.deploy.outputs.webAppName }}
+      web_app_hostname: ${{ steps.deploy.outputs.webAppDefaultHostName }}
+      storage_account_name: ${{ steps.deploy.outputs.storageAccountName }}
+      resource_group_name: ${{ steps.deploy.outputs.resourceGroupName }}
+      auth_mi_client_id: ${{ steps.deploy.outputs.authManagedIdentityClientId }}
+      auth_mi_object_id: ${{ steps.deploy.outputs.authManagedIdentityObjectId }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy Bicep template
+        id: deploy
+        run: |
+          DEPLOYMENT_NAME="deploy-fs-judgepapers-$(date +%s)"
+
+          OUTPUT=$(az deployment sub create \
+            --location "${{ vars.LOCATION }}" \
+            --template-file infra/main.bicep \
+            --name "$DEPLOYMENT_NAME" \
+            --parameters \
+              resourceGroupName="${{ vars.RESOURCE_GROUP_NAME }}" \
+              authClientId="${{ secrets.AUTH_CLIENT_ID }}" \
+            --query 'properties.outputs' \
+            -o json)
+
+          echo "functionAppName=$(echo "$OUTPUT" | jq -r '.functionAppName.value')" >> "$GITHUB_OUTPUT"
+          echo "webAppName=$(echo "$OUTPUT" | jq -r '.webAppName.value')" >> "$GITHUB_OUTPUT"
+          echo "webAppDefaultHostName=$(echo "$OUTPUT" | jq -r '.webAppDefaultHostName.value')" >> "$GITHUB_OUTPUT"
+          echo "storageAccountName=$(echo "$OUTPUT" | jq -r '.storageAccountName.value')" >> "$GITHUB_OUTPUT"
+          echo "resourceGroupName=$(echo "$OUTPUT" | jq -r '.resourceGroupName.value')" >> "$GITHUB_OUTPUT"
+          echo "authManagedIdentityClientId=$(echo "$OUTPUT" | jq -r '.authManagedIdentityClientId.value')" >> "$GITHUB_OUTPUT"
+          echo "authManagedIdentityObjectId=$(echo "$OUTPUT" | jq -r '.authManagedIdentityObjectId.value')" >> "$GITHUB_OUTPUT"
+
+      - name: Create federated identity credential on app registration
+        run: |
+          set -euo pipefail
+
+          AUTH_APP_OBJECT_ID="${{ secrets.AUTH_APP_OBJECT_ID }}"
+          MI_OBJECT_ID="${{ steps.deploy.outputs.authManagedIdentityObjectId }}"
+          TENANT_ID="${{ vars.AZURE_TENANT_ID }}"
+          WEB_APP_HOSTNAME="${{ steps.deploy.outputs.webAppDefaultHostName }}"
+          FUNC_APP_NAME="${{ steps.deploy.outputs.functionAppName }}"
+
+          if [ -z "${AUTH_APP_OBJECT_ID}" ]; then
+            echo "ERROR: AUTH_APP_OBJECT_ID is not set. Ensure the AUTH_APP_OBJECT_ID secret is configured."
+            exit 1
+          fi
+
+          if [ -z "${MI_OBJECT_ID}" ]; then
+            echo "ERROR: Managed identity object ID is empty. Check the 'Deploy Bicep template' step output."
+            exit 1
+          fi
+          # Update app registration redirect URIs with actual hostnames
+          echo "Updating redirect URIs on app registration..."
+          REDIRECT_URIS=$(jq -n \
+            --arg web "https://${WEB_APP_HOSTNAME}/.auth/login/aad/callback" \
+            --arg func "https://${FUNC_APP_NAME}.azurewebsites.net/.auth/login/aad/callback" \
+            '{web: {redirectUris: [$web, $func]}}')
+          az rest --method PATCH \
+            --uri "https://graph.microsoft.com/v1.0/applications/${AUTH_APP_OBJECT_ID}" \
+            --headers 'Content-Type=application/json' \
+            --body "$REDIRECT_URIS"
+          echo "Redirect URIs updated."
+
+          # Check if federated credential already exists
+          EXISTING_SUBJECT=$(az ad app federated-credential list \
+            --id "$AUTH_APP_OBJECT_ID" \
+            --query "[?name=='easyauth-managed-identity-fic'].subject" \
+            -o tsv 2>/dev/null || echo "")
+
+          FIC_PARAMS="{
+            \"name\": \"easyauth-managed-identity-fic\",
+            \"issuer\": \"https://login.microsoftonline.com/${TENANT_ID}/v2.0\",
+            \"subject\": \"${MI_OBJECT_ID}\",
+            \"audiences\": [\"api://AzureADTokenExchange\"],
+            \"description\": \"Allow Easy Auth to use managed identity instead of client secret\"
+          }"
+
+          if [ -z "$EXISTING_SUBJECT" ]; then
+            echo "Creating federated identity credential..."
+            az ad app federated-credential create \
+              --id "$AUTH_APP_OBJECT_ID" \
+              --parameters "$FIC_PARAMS"
+            echo "Federated identity credential created."
+          elif [ "$EXISTING_SUBJECT" != "$MI_OBJECT_ID" ]; then
+            echo "FIC subject mismatch (existing: $EXISTING_SUBJECT, expected: $MI_OBJECT_ID). Updating..."
+            FIC_ID=$(az ad app federated-credential list \
+              --id "$AUTH_APP_OBJECT_ID" \
+              --query "[?name=='easyauth-managed-identity-fic'].id" \
+              -o tsv)
+            az rest --method PATCH \
+              --uri "https://graph.microsoft.com/v1.0/applications/${AUTH_APP_OBJECT_ID}/federatedIdentityCredentials/${FIC_ID}" \
+              --headers 'Content-Type=application/json' \
+              --body "{\"subject\": \"${MI_OBJECT_ID}\"}"
+            echo "Federated identity credential updated."
+          else
+            echo "Federated identity credential already exists with correct subject, skipping."
+          fi
+
+  deploy-backend:
+    name: Deploy Backend (Functions)
+    needs: [set-environment, deploy-infra]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.set-environment.outputs.env_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build backend package
+        run: |
+          BUILD_DIR=$(mktemp -d)
+          cp -r infra/functions/* "$BUILD_DIR/"
+
+          cd "$BUILD_DIR"
+          rm -rf .venv __pycache__ .git .vscode *.pyc local.settings.json
+          rm -f test_*.py
+
+          mkdir -p .python_packages/lib/site-packages
+          pip install -r requirements.txt --target .python_packages/lib/site-packages
+
+          zip -r "$GITHUB_WORKSPACE/backend.zip" .
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to Azure Functions
+        run: |
+          FUNC_APP_NAME="${{ needs.deploy-infra.outputs.function_app_name }}"
+          RESOURCE_GROUP="${{ needs.deploy-infra.outputs.resource_group_name }}"
+
+          az functionapp deployment source config-zip \
+            --src backend.zip \
+            --name "$FUNC_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP"
+
+  deploy-frontend:
+    name: Deploy Frontend (Web App)
+    needs: [set-environment, deploy-infra]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.set-environment.outputs.env_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Create deployment package
+        run: |
+          STAGE_DIR=$(mktemp -d)
+          cp frontend/server.js "$STAGE_DIR/"
+          mkdir -p "$STAGE_DIR/public"
+          cp -r frontend/dist/* "$STAGE_DIR/public/"
+
+          cd "$STAGE_DIR"
+          zip -r "$GITHUB_WORKSPACE/frontend.zip" .
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Configure Web App settings
+        run: |
+          RESOURCE_GROUP="${{ needs.deploy-infra.outputs.resource_group_name }}"
+          WEBAPP_NAME="${{ needs.deploy-infra.outputs.web_app_name }}"
+          FUNCTION_APP_URL="https://${{ needs.deploy-infra.outputs.function_app_name }}.azurewebsites.net"
+
+          az webapp config appsettings set \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$WEBAPP_NAME" \
+            --settings \
+              FUNCTION_APP_URL="$FUNCTION_APP_URL" \
+              SCM_DO_BUILD_DURING_DEPLOYMENT="false" \
+            --output none
+
+          az webapp config set \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$WEBAPP_NAME" \
+            --startup-file "node server.js" \
+            --linux-fx-version "NODE|22-lts" \
+            --output none
+
+      - name: Disable token store
+        run: |
+          RESOURCE_GROUP="${{ needs.deploy-infra.outputs.resource_group_name }}"
+          WEBAPP_NAME="${{ needs.deploy-infra.outputs.web_app_name }}"
+          SUBSCRIPTION_ID="${{ vars.AZURE_SUBSCRIPTION_ID }}"
+
+          # Get current auth settings, disable token store, and PUT back
+          AUTH_CONFIG=$(az rest --method GET \
+            --uri "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Web/sites/${WEBAPP_NAME}/config/authsettingsV2?api-version=2022-09-01")
+
+          UPDATED_CONFIG=$(echo "$AUTH_CONFIG" | python3 -c "
+          import sys, json
+          config = json.load(sys.stdin)
+          config.get('properties', {}).setdefault('login', {}).setdefault('tokenStore', {})['enabled'] = False
+          json.dump(config, sys.stdout)
+          ")
+
+          az rest --method PUT \
+            --uri "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Web/sites/${WEBAPP_NAME}/config/authsettingsV2?api-version=2022-09-01" \
+            --body "$UPDATED_CONFIG" \
+            --output none || echo "Warning: Could not disable token store. It may already be disabled via Bicep."
+
+      - name: Deploy to Azure Web App
+        run: |
+          az webapp deploy \
+            --resource-group "${{ needs.deploy-infra.outputs.resource_group_name }}" \
+            --name "${{ needs.deploy-infra.outputs.web_app_name }}" \
+            --src-path frontend.zip \
+            --type zip \
+            --clean true

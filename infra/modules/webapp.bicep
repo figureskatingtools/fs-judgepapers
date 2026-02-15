@@ -4,8 +4,8 @@ param appServicePlanName string
 param skuName string = 'B1'
 param skuTier string = 'Basic'
 param authClientId string = ''
-@secure()
-param authClientSecret string = ''
+param authManagedIdentityClientId string = ''
+param authManagedIdentityResourceId string = ''
 param tenantId string = subscription().tenantId
 
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
@@ -24,6 +24,12 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
   name: webAppName
   location: location
   kind: 'app,linux'
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${authManagedIdentityResourceId}': {}
+    }
+  }
   properties: {
     serverFarmId: appServicePlan.id
     siteConfig: {
@@ -47,7 +53,7 @@ resource authConfig 'Microsoft.Web/sites/config@2022-09-01' = if (!empty(authCli
         enabled: true
         registration: {
           clientId: authClientId
-          clientSecretSettingName: 'MICROSOFT_PROVIDER_AUTHENTICATION_SECRET'
+          clientSecretSettingName: 'OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID'
           openIdIssuer: '${environment().authentication.loginEndpoint}${tenantId}/v2.0'
         }
         validation: {
@@ -65,11 +71,11 @@ resource authConfig 'Microsoft.Web/sites/config@2022-09-01' = if (!empty(authCli
   }
 }
 
-resource authSecret 'Microsoft.Web/sites/config@2022-09-01' = if (!empty(authClientId)) {
+resource authAppSettings 'Microsoft.Web/sites/config@2022-09-01' = if (!empty(authClientId)) {
   parent: webApp
   name: 'appsettings'
   properties: {
-     MICROSOFT_PROVIDER_AUTHENTICATION_SECRET: authClientSecret
+    OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID: authManagedIdentityClientId
   }
 }
 
