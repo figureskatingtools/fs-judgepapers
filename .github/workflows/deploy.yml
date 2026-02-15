@@ -175,13 +175,9 @@ jobs:
             --file backend.zip \
             --overwrite
 
-          # Sync the function app to pick up the new package
-          az functionapp deploy \
-            -g "$RESOURCE_GROUP" \
-            -n "$FUNC_APP_NAME" \
-            --src-url "https://${STORAGE_ACCOUNT}.blob.core.windows.net/app-package/backend.zip" \
-            --type zip \
-            --async true
+          # Sync the function app to pick up the new package from blob storage
+          az rest --method POST \
+            --url "https://management.azure.com/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Web/sites/${FUNC_APP_NAME}/syncfunctiontriggers?api-version=2023-12-01"
 
   deploy-frontend:
     name: Deploy Frontend (Web App)
