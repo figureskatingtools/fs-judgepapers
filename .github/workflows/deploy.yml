@@ -105,25 +105,38 @@ jobs:
           echo "Redirect URIs updated."
 
           # Check if federated credential already exists
-          EXISTING=$(az ad app federated-credential list \
+          EXISTING_SUBJECT=$(az ad app federated-credential list \
             --id "$AUTH_APP_OBJECT_ID" \
-            --query "[?name=='easyauth-managed-identity-fic'].name" \
+            --query "[?name=='easyauth-managed-identity-fic'].subject" \
             -o tsv 2>/dev/null || echo "")
 
-          if [ -z "$EXISTING" ]; then
+          FIC_PARAMS="{
+            \"name\": \"easyauth-managed-identity-fic\",
+            \"issuer\": \"https://login.microsoftonline.com/${TENANT_ID}/v2.0\",
+            \"subject\": \"${MI_OBJECT_ID}\",
+            \"audiences\": [\"api://AzureADTokenExchange\"],
+            \"description\": \"Allow Easy Auth to use managed identity instead of client secret\"
+          }"
+
+          if [ -z "$EXISTING_SUBJECT" ]; then
             echo "Creating federated identity credential..."
             az ad app federated-credential create \
               --id "$AUTH_APP_OBJECT_ID" \
-              --parameters "{
-                \"name\": \"easyauth-managed-identity-fic\",
-                \"issuer\": \"https://login.microsoftonline.com/${TENANT_ID}/v2.0\",
-                \"subject\": \"${MI_OBJECT_ID}\",
-                \"audiences\": [\"api://AzureADTokenExchange\"],
-                \"description\": \"Allow Easy Auth to use managed identity instead of client secret\"
-              }"
+              --parameters "$FIC_PARAMS"
             echo "Federated identity credential created."
+          elif [ "$EXISTING_SUBJECT" != "$MI_OBJECT_ID" ]; then
+            echo "FIC subject mismatch (existing: $EXISTING_SUBJECT, expected: $MI_OBJECT_ID). Updating..."
+            FIC_ID=$(az ad app federated-credential list \
+              --id "$AUTH_APP_OBJECT_ID" \
+              --query "[?name=='easyauth-managed-identity-fic'].id" \
+              -o tsv)
+            az ad app federated-credential delete --id "$AUTH_APP_OBJECT_ID" --federated-credential-id "$FIC_ID"
+            az ad app federated-credential create \
+              --id "$AUTH_APP_OBJECT_ID" \
+              --parameters "$FIC_PARAMS"
+            echo "Federated identity credential updated."
           else
-            echo "Federated identity credential already exists, skipping."
+            echo "Federated identity credential already exists with correct subject, skipping."
           fi
 
   deploy-backend:
