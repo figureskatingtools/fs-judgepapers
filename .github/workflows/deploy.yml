@@ -163,10 +163,25 @@ jobs:
 
       - name: Deploy to Azure Functions
         run: |
-          az functionapp deployment source config-zip \
-            -g "${{ needs.deploy-infra.outputs.resource_group_name }}" \
-            -n "${{ needs.deploy-infra.outputs.function_app_name }}" \
-            --src backend.zip
+          STORAGE_ACCOUNT="${{ needs.deploy-infra.outputs.storage_account_name }}"
+          FUNC_APP_NAME="${{ needs.deploy-infra.outputs.function_app_name }}"
+          RESOURCE_GROUP="${{ needs.deploy-infra.outputs.resource_group_name }}"
+
+          # Upload zip to the app-package blob container (Flex Consumption deploys from blob storage)
+          az storage blob upload \
+            --account-name "$STORAGE_ACCOUNT" \
+            --container-name "app-package" \
+            --name "backend.zip" \
+            --file backend.zip \
+            --overwrite
+
+          # Sync the function app to pick up the new package
+          az functionapp deploy \
+            -g "$RESOURCE_GROUP" \
+            -n "$FUNC_APP_NAME" \
+            --src-url "https://${STORAGE_ACCOUNT}.blob.core.windows.net/app-package/backend.zip" \
+            --type zip \
+            --async true
 
   deploy-frontend:
     name: Deploy Frontend (Web App)
