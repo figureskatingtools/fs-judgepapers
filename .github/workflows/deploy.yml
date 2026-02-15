@@ -225,7 +225,9 @@ jobs:
           az webapp config appsettings set \
             --resource-group "$RESOURCE_GROUP" \
             --name "$WEBAPP_NAME" \
-            --settings FUNCTION_APP_URL="$FUNCTION_APP_URL" \
+            --settings \
+              FUNCTION_APP_URL="$FUNCTION_APP_URL" \
+              SCM_DO_BUILD_DURING_DEPLOYMENT="false" \
             --output none
 
           az webapp config set \
@@ -259,7 +261,9 @@ jobs:
 
       - name: Deploy to Azure Web App
         run: |
-          az webapp deployment source config-zip \
+          az webapp deploy \
             --resource-group "${{ needs.deploy-infra.outputs.resource_group_name }}" \
             --name "${{ needs.deploy-infra.outputs.web_app_name }}" \
-            --src frontend.zip
+            --src-path frontend.zip \
+            --type zip \
+            --clean true
