@@ -45,8 +45,9 @@ resource authConfig 'Microsoft.Web/sites/config@2022-09-01' = if (!empty(authCli
   name: 'authsettingsV2'
   properties: {
     globalValidation: {
-      requireAuthentication: false
-      unauthenticatedClientAction: 'AllowAnonymous'
+      requireAuthentication: true
+      unauthenticatedClientAction: 'RedirectToLoginPage'
+      redirectToProvider: 'azureactivedirectory'
     }
     identityProviders: {
       azureActiveDirectory: {
