@@ -47,6 +47,12 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       cors: {
         allowedOrigins: allowedOrigins
       }
+      // Explicitly no inbound IP restrictions. The endpoint must stay reachable
+      // by the Web App proxy AND by the CI deploy's sync-triggers/health-check
+      // (a Deny lock 403s the GitHub runner and hangs the pipeline). An empty
+      // array also clears any restriction left over from a prior deploy.
+      ipSecurityRestrictions: []
+      ipSecurityRestrictionsDefaultAction: 'Allow'
       appSettings: [
         {
           name: 'AzureWebJobsStorage__accountName'
