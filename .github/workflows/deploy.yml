@@ -2,7 +2,7 @@ name: Deploy to Azure
 
 on:
   push:
-    branches: [main, test, dev]
+    branches: [main, test]
 
 permissions:
   id-token: write
@@ -22,8 +22,6 @@ jobs:
             echo "env_name=prod" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.ref }}" == "refs/heads/test" ]]; then
             echo "env_name=test" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
-            echo "env_name=dev" >> "$GITHUB_OUTPUT"
           fi
 
   deploy-infra:
@@ -62,6 +60,7 @@ jobs:
             --parameters \
               resourceGroupName="${{ vars.RESOURCE_GROUP_NAME }}" \
               authClientId="${{ secrets.AUTH_CLIENT_ID }}" \
+              customDomain="${{ vars.CUSTOM_DOMAIN }}" \
             --query 'properties.outputs' \
             -o json)
 
@@ -93,11 +92,15 @@ jobs:
             exit 1
           fi
           # Update app registration redirect URIs with actual hostnames
+          # (includes the custom domain when configured, since Easy Auth
+          # callbacks happen on whichever hostname the user browsed to)
           echo "Updating redirect URIs on app registration..."
+          CUSTOM_DOMAIN="${{ vars.CUSTOM_DOMAIN }}"
           REDIRECT_URIS=$(jq -n \
             --arg web "https://${WEB_APP_HOSTNAME}/.auth/login/aad/callback" \
             --arg func "https://${FUNC_APP_NAME}.azurewebsites.net/.auth/login/aad/callback" \
-            '{web: {redirectUris: [$web, $func]}}')
+            --arg custom "${CUSTOM_DOMAIN:+https://${CUSTOM_DOMAIN}/.auth/login/aad/callback}" \
+            '{web: {redirectUris: ([$web, $func] + (if $custom == "" then [] else [$custom] end))}}')
           az rest --method PATCH \
             --uri "https://graph.microsoft.com/v1.0/applications/${AUTH_APP_OBJECT_ID}" \
             --headers 'Content-Type=application/json' \

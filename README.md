@@ -30,8 +30,7 @@ A web application for generating judging packets for figure skating competitions
 
 | Branch | Environment | Purpose |
 |---|---|---|
-| `dev` | Development | Active development, feature branches merge here |
-| `test` | Test | Staging/QA, promoted from dev via PR |
+| `test` | Test | Active development and staging/QA, feature branches merge here |
 | `main` | Production | Stable releases, promoted from test via PR |
 
 ## Prerequisites
@@ -51,6 +50,8 @@ A web application for generating judging packets for figure skating competitions
 ```
 
 Deploys Azure resources (Resource Group, Storage Account, Function App, Web App, Application Insights, RBAC) using Bicep.
+
+When a custom domain is configured (`customDomain` parameter, set per environment in `infra/parameters/*.bicepparam` and via the `CUSTOM_DOMAIN` GitHub environment variable), the deployment also creates the CNAME and `asuid` verification records in the shared `figureskatingtools.com` DNS zone (`rg-fs-dns`, owned by the landing-page deployment) and binds the domain to the Web App with a free App Service managed certificate.
 
 ### 2. Backend
 

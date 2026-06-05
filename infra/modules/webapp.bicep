@@ -81,3 +81,5 @@ resource authAppSettings 'Microsoft.Web/sites/config@2022-09-01' = if (!empty(au
 
 output webAppName string = webApp.name
 output webAppDefaultHostName string = webApp.properties.defaultHostName
+output customDomainVerificationId string = webApp.properties.customDomainVerificationId
+output appServicePlanId string = appServicePlan.id
