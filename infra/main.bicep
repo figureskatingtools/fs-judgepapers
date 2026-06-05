@@ -5,6 +5,18 @@ param resourceGroupName string = ''
 param authClientId string = ''
 param tenantId string = ''
 
+// Shared secret between the Web App proxy and the Function App (see function.bicep).
+@secure()
+param proxySharedSecret string = ''
+
+// Custom domain for the web app (e.g. 'judgepapers.figureskatingtools.com').
+// Empty = skip DNS + domain binding. The DNS zone itself is deployed by the
+// root frontend site (figureskatingtools.com landing page); this deployment
+// only manages its own record sets in that zone.
+param customDomain string = ''
+param dnsZoneName string = 'figureskatingtools.com'
+param dnsZoneResourceGroup string = 'rg-fs-dns'
+
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
   name: resourceGroupName
   location: location
@@ -60,7 +72,35 @@ module function 'modules/function.bicep' = {
     authManagedIdentityClientId: authManagedIdentity.outputs.clientId
     authManagedIdentityResourceId: authManagedIdentity.outputs.resourceId
     tenantId: !empty(tenantId) ? tenantId : subscription().tenantId
+    proxySharedSecret: proxySharedSecret
   }
+}
+
+// DNS records (CNAME + asuid TXT) in the shared figureskatingtools.com zone
+module dns 'modules/dns.bicep' = if (!empty(customDomain)) {
+  scope: resourceGroup(dnsZoneResourceGroup)
+  name: 'dnsDeployment'
+  params: {
+    dnsZoneName: dnsZoneName
+    recordName: replace(customDomain, '.${dnsZoneName}', '')
+    targetHostname: webApp.outputs.webAppDefaultHostName
+    domainVerificationId: webApp.outputs.customDomainVerificationId
+  }
+}
+
+// Hostname binding + managed certificate (requires DNS records above)
+module webAppCustomDomain 'modules/webapp-customdomain.bicep' = if (!empty(customDomain)) {
+  scope: rg
+  name: 'customDomainDeployment'
+  params: {
+    webAppName: webApp.outputs.webAppName
+    customDomain: customDomain
+    appServicePlanId: webApp.outputs.appServicePlanId
+    location: location
+  }
+  dependsOn: [
+    dns
+  ]
 }
 
 module roleAssignment 'modules/roleassignment.bicep' = {
@@ -79,3 +119,4 @@ output webAppName string = webApp.outputs.webAppName
 output webAppDefaultHostName string = webApp.outputs.webAppDefaultHostName
 output authManagedIdentityClientId string = authManagedIdentity.outputs.clientId
 output authManagedIdentityObjectId string = authManagedIdentity.outputs.principalId
+output customDomain string = customDomain

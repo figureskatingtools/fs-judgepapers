@@ -38,29 +38,10 @@ body {
   padding: 0;
 }
 
-/* Header & Nav */
-header {
-  background-color: var(--card-bg);
-  border-bottom: 1px solid var(--border-color);
-  box-shadow: var(--shadow-sm);
-  padding: 1rem 2rem;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  position: sticky;
-  top: 0;
-  z-index: 10;
-}
-
-.brand {
-  font-size: 1.5rem;
-  font-weight: 700;
-  background: linear-gradient(to right, var(--primary-color), #ec4899); /* Indigo to Pink */
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  letter-spacing: -0.025em;
-}
-
+/* Header & Nav
+   The site header itself comes from @figureskatingtools/shared-ui
+   (injected styles, .fst-nav classes). Below: the user menu rendered
+   into the nav's #fst-nav-right slot. */
 .user-menu-container {
   position: relative;
 }

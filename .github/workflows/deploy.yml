@@ -1,12 +1,24 @@
 name: Deploy to Azure
 
 on:
+  # Push to main auto-deploys prod. test is deployed only via manual dispatch
+  # (run the workflow from the branch whose code you want to deploy).
   push:
-    branches: [main, test, dev]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        type: choice
+        options:
+          - test
+          - prod
+        default: test
 
 permissions:
   id-token: write
   contents: read
+  packages: read
 
 jobs:
   set-environment:
@@ -18,12 +30,10 @@ jobs:
       - name: Set environment name
         id: set-env
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "env_name=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "env_name=prod" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.ref }}" == "refs/heads/test" ]]; then
-            echo "env_name=test" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
-            echo "env_name=dev" >> "$GITHUB_OUTPUT"
           fi
 
   deploy-infra:
@@ -41,10 +51,10 @@ jobs:
       auth_mi_object_id: ${{ steps.deploy.outputs.authManagedIdentityObjectId }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -62,6 +72,8 @@ jobs:
             --parameters \
               resourceGroupName="${{ vars.RESOURCE_GROUP_NAME }}" \
               authClientId="${{ secrets.AUTH_CLIENT_ID }}" \
+              customDomain="${{ vars.CUSTOM_DOMAIN }}" \
+              proxySharedSecret="${{ secrets.PROXY_SHARED_SECRET }}" \
             --query 'properties.outputs' \
             -o json)
 
@@ -93,11 +105,15 @@ jobs:
             exit 1
           fi
           # Update app registration redirect URIs with actual hostnames
+          # (includes the custom domain when configured, since Easy Auth
+          # callbacks happen on whichever hostname the user browsed to)
           echo "Updating redirect URIs on app registration..."
+          CUSTOM_DOMAIN="${{ vars.CUSTOM_DOMAIN }}"
           REDIRECT_URIS=$(jq -n \
             --arg web "https://${WEB_APP_HOSTNAME}/.auth/login/aad/callback" \
             --arg func "https://${FUNC_APP_NAME}.azurewebsites.net/.auth/login/aad/callback" \
-            '{web: {redirectUris: [$web, $func]}}')
+            --arg custom "${CUSTOM_DOMAIN:+https://${CUSTOM_DOMAIN}/.auth/login/aad/callback}" \
+            '{web: {redirectUris: ([$web, $func] + (if $custom == "" then [] else [$custom] end))}}')
           az rest --method PATCH \
             --uri "https://graph.microsoft.com/v1.0/applications/${AUTH_APP_OBJECT_ID}" \
             --headers 'Content-Type=application/json' \
@@ -146,10 +162,10 @@ jobs:
     environment: ${{ needs.set-environment.outputs.env_name }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -168,7 +184,7 @@ jobs:
           zip -r "$GITHUB_WORKSPACE/backend.zip" .
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -191,14 +207,19 @@ jobs:
     environment: ${{ needs.set-environment.outputs.env_name }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@figureskatingtools'
 
       - name: Build frontend
+        env:
+          # Auth for @figureskatingtools/shared-ui on GitHub Packages
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd frontend
           npm ci
@@ -215,7 +236,7 @@ jobs:
           zip -r "$GITHUB_WORKSPACE/frontend.zip" .
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -233,6 +254,7 @@ jobs:
             --settings \
               FUNCTION_APP_URL="$FUNCTION_APP_URL" \
               SCM_DO_BUILD_DURING_DEPLOYMENT="false" \
+              PROXY_SHARED_SECRET="${{ secrets.PROXY_SHARED_SECRET }}" \
             --output none
 
           az webapp config set \

@@ -113,6 +113,12 @@ function proxyToFunctionApp(req, res) {
     const principalHeader = req.headers['x-ms-client-principal'];
     const principalName = req.headers['x-ms-client-principal-name'];
     
+    // Shared secret proving this request came from the proxy (the Function App
+    // is public; this stops direct callers from spoofing the email header).
+    if (process.env.PROXY_SHARED_SECRET) {
+        outHeaders['x-proxy-secret'] = process.env.PROXY_SHARED_SECRET;
+    }
+
     if (principalName) {
         outHeaders['x-forwarded-user-email'] = principalName;
     }

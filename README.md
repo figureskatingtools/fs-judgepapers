@@ -28,11 +28,10 @@ A web application for generating judging packets for figure skating competitions
 
 ## Branch Strategy
 
-| Branch | Environment | Purpose |
-|---|---|---|
-| `dev` | Development | Active development, feature branches merge here |
-| `test` | Test | Staging/QA, promoted from dev via PR |
-| `main` | Production | Stable releases, promoted from test via PR |
+| Branch | Environment | Purpose | Deploy trigger |
+|---|---|---|---|
+| `test` | Test | Active development and staging/QA, feature branches merge here | Manual (`workflow_dispatch`) — run the workflow from the `test` branch |
+| `main` | Production | Stable releases, promoted from test via PR | Automatic on push to `main` |
 
 ## Prerequisites
 
@@ -51,6 +50,8 @@ A web application for generating judging packets for figure skating competitions
 ```
 
 Deploys Azure resources (Resource Group, Storage Account, Function App, Web App, Application Insights, RBAC) using Bicep.
+
+When a custom domain is configured (`customDomain` parameter, set per environment in `infra/parameters/*.bicepparam` and via the `CUSTOM_DOMAIN` GitHub environment variable), the deployment also creates the CNAME and `asuid` verification records in the shared `figureskatingtools.com` DNS zone (`rg-fs-dns`, owned by the landing-page deployment) and binds the domain to the Web App with a free App Service managed certificate.
 
 ### 2. Backend
 
@@ -103,9 +104,14 @@ This starts the Azure Functions backend, the Vite dev server, and SWA CLI for lo
 3. **Frontend:**
     ```bash
     cd frontend
-    npm install
+    NODE_AUTH_TOKEN=$(gh auth token) npm install   # token needs read:packages scope
     npm run dev
     ```
+
+    > The frontend consumes `@figureskatingtools/shared-ui` (the shared site
+    > navigation) from GitHub Packages, which requires an authenticated token
+    > with `read:packages` even for installs. Grant the scope once with
+    > `gh auth refresh -s read:packages`, or use a classic PAT.
 
 ## Project Structure
 
