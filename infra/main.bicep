@@ -5,6 +5,10 @@ param resourceGroupName string = ''
 param authClientId string = ''
 param tenantId string = ''
 
+// Shared secret between the Web App proxy and the Function App (see function.bicep).
+@secure()
+param proxySharedSecret string = ''
+
 // Custom domain for the web app (e.g. 'judgepapers.figureskatingtools.com').
 // Empty = skip DNS + domain binding. The DNS zone itself is deployed by the
 // root frontend site (figureskatingtools.com landing page); this deployment
@@ -68,6 +72,7 @@ module function 'modules/function.bicep' = {
     authManagedIdentityClientId: authManagedIdentity.outputs.clientId
     authManagedIdentityResourceId: authManagedIdentity.outputs.resourceId
     tenantId: !empty(tenantId) ? tenantId : subscription().tenantId
+    proxySharedSecret: proxySharedSecret
   }
 }
 

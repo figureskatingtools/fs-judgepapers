@@ -62,6 +62,7 @@ jobs:
               resourceGroupName="${{ vars.RESOURCE_GROUP_NAME }}" \
               authClientId="${{ secrets.AUTH_CLIENT_ID }}" \
               customDomain="${{ vars.CUSTOM_DOMAIN }}" \
+              proxySharedSecret="${{ secrets.PROXY_SHARED_SECRET }}" \
             --query 'properties.outputs' \
             -o json)
 
@@ -242,6 +243,7 @@ jobs:
             --settings \
               FUNCTION_APP_URL="$FUNCTION_APP_URL" \
               SCM_DO_BUILD_DURING_DEPLOYMENT="false" \
+              PROXY_SHARED_SECRET="${{ secrets.PROXY_SHARED_SECRET }}" \
             --output none
 
           az webapp config set \

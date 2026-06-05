@@ -31,6 +31,21 @@ def is_user_allowed(email: str) -> bool:
     """
     return True
 
+def _proxy_secret_ok(req: func.HttpRequest) -> bool:
+    """
+    Verify the request came from the Web App proxy by checking the shared
+    secret header. The function endpoint is public, so this prevents anyone
+    from spoofing the X-Forwarded-User-Email header directly.
+
+    Enforced only when PROXY_SHARED_SECRET is set (so local dev and any
+    brief pre-rollout window fail open rather than locking everyone out).
+    """
+    expected = os.environ.get("PROXY_SHARED_SECRET")
+    if not expected:
+        return True
+    provided = req.headers.get("X-Proxy-Secret") or req.headers.get("x-proxy-secret")
+    return provided == expected
+
 def _decode_jwt_payload(token: str) -> dict | None:
     """Decode the payload of a JWT token without verification (base64 only)."""
     try:
@@ -52,6 +67,11 @@ def get_user_email_from_header(req: func.HttpRequest) -> str | None:
     injected by Azure Static Web Apps or App Service Auth,
     or from the Authorization Bearer JWT token.
     """
+    # 0. Reject requests that didn't come through the Web App proxy
+    if not _proxy_secret_ok(req):
+        logging.warning("Proxy shared secret missing or mismatched; rejecting request")
+        return None
+
     # 1. Try Direct Header (Standard Easy Auth)
     val = req.headers.get("X-MS-CLIENT-PRINCIPAL-NAME") or req.headers.get("x-ms-client-principal-name")
     if val:

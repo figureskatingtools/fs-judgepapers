@@ -10,6 +10,11 @@ param authManagedIdentityClientId string = ''
 param authManagedIdentityResourceId string = ''
 param tenantId string = ''
 
+// Shared secret the Web App proxy sends as X-Proxy-Secret. Empty = the
+// function doesn't enforce it (local/dev). See function_app.py:_proxy_secret_ok.
+@secure()
+param proxySharedSecret string = ''
+
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: appServicePlanName
   location: location
@@ -65,6 +70,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID'
           value: authManagedIdentityClientId
+        }
+        {
+          name: 'PROXY_SHARED_SECRET'
+          value: proxySharedSecret
         }
       ]
     }
