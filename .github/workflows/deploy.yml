@@ -1,8 +1,19 @@
 name: Deploy to Azure
 
 on:
+  # Push to main auto-deploys prod. test is deployed only via manual dispatch
+  # (run the workflow from the branch whose code you want to deploy).
   push:
-    branches: [main, test]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        type: choice
+        options:
+          - test
+          - prod
+        default: test
 
 permissions:
   id-token: write
@@ -19,10 +30,10 @@ jobs:
       - name: Set environment name
         id: set-env
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "env_name=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "env_name=prod" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.ref }}" == "refs/heads/test" ]]; then
-            echo "env_name=test" >> "$GITHUB_OUTPUT"
           fi
 
   deploy-infra:
@@ -40,10 +51,10 @@ jobs:
       auth_mi_object_id: ${{ steps.deploy.outputs.authManagedIdentityObjectId }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -151,10 +162,10 @@ jobs:
     environment: ${{ needs.set-environment.outputs.env_name }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -173,7 +184,7 @@ jobs:
           zip -r "$GITHUB_WORKSPACE/backend.zip" .
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -196,10 +207,10 @@ jobs:
     environment: ${{ needs.set-environment.outputs.env_name }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
           registry-url: 'https://npm.pkg.github.com'
@@ -225,7 +236,7 @@ jobs:
           zip -r "$GITHUB_WORKSPACE/frontend.zip" .
 
       - name: Azure Login (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}

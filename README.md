@@ -28,10 +28,10 @@ A web application for generating judging packets for figure skating competitions
 
 ## Branch Strategy
 
-| Branch | Environment | Purpose |
-|---|---|---|
-| `test` | Test | Active development and staging/QA, feature branches merge here |
-| `main` | Production | Stable releases, promoted from test via PR |
+| Branch | Environment | Purpose | Deploy trigger |
+|---|---|---|---|
+| `test` | Test | Active development and staging/QA, feature branches merge here | Manual (`workflow_dispatch`) — run the workflow from the `test` branch |
+| `main` | Production | Stable releases, promoted from test via PR | Automatic on push to `main` |
 
 ## Prerequisites
 

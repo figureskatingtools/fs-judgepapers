@@ -75,4 +75,4 @@ Human-readable segment names aren't in filenames; they're extracted from line 2 
 
 ## Branch / Deploy Strategy
 
-`test` → `main` promote via PRs; pushing to each branch triggers `.github/workflows/deploy.yml`, which deploys infra (Bicep), backend, and frontend to the matching GitHub environment (test/prod). The workflow also patches the Entra app registration (redirect URIs, federated identity credential) and disables the Easy Auth token store.
+`test` → `main` promote via PRs. `.github/workflows/deploy.yml` deploys infra (Bicep), backend, and frontend to the matching GitHub environment: **push to `main` auto-deploys prod**; **`test` is manual-only** via `workflow_dispatch` (run the workflow from the branch whose code you want, pick the environment) — there is no `test`-branch push trigger. This mirrors the figureskatingtools-site repo. The workflow also patches the Entra app registration (redirect URIs, federated identity credential) and disables the Easy Auth token store.
