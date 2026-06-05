@@ -64,7 +64,6 @@ module function 'modules/function.bicep' = {
     allowedOrigins: [
       'https://${webApp.outputs.webAppDefaultHostName}'
     ]
-    allowedOutboundIps: webApp.outputs.possibleOutboundIpAddresses
     authClientId: authClientId
     authManagedIdentityClientId: authManagedIdentity.outputs.clientId
     authManagedIdentityResourceId: authManagedIdentity.outputs.resourceId
