@@ -8,7 +8,7 @@ A web application for generating judging packets for figure skating competitions
 |---|---|
 | **Frontend** | TypeScript + Vite, served by Node.js proxy server |
 | **Backend** | Python Azure Functions (HTTP triggers), pypdf & reportlab |
-| **Auth** | Microsoft Entra ID via Azure App Service Easy Auth |
+| **Auth** | Microsoft Entra ID via Azure App Service Easy Auth (auto-redirect, silent SSO from figureskatingtools.com) |
 | **Storage** | Azure Blob Storage (PDFs) + Azure Table Storage (metadata) |
 | **Infrastructure** | Azure Bicep (subscription-scoped) |
 
@@ -17,6 +17,10 @@ A web application for generating judging packets for figure skating competitions
 1. **Upload** — Source PDF files are uploaded via the web UI to Azure Blob Storage
 2. **Process** — Azure Function splits judge sheets, creates cover pages, and merges documents into per-judge packets
 3. **Download** — Generated packets are stored in Blob Storage with SAS-linked download URLs
+
+### Authentication
+
+Sign-in is Microsoft Entra ID enforced by App Service Easy Auth: unauthenticated visitors are redirected straight to the Entra sign-in page (`RedirectToLoginPage`). With an active session in the same tenant — e.g. after signing in on [figureskatingtools.com](https://figureskatingtools.com) — the redirect completes silently, so moving between the tools requires no extra sign-in. The Function App itself is anonymous; the Web App proxy authenticates calls to it with a forwarded identity header plus a shared secret (see `CLAUDE.md` for the full chain).
 
 ## Features
 
