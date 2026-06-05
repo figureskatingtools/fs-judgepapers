@@ -1,5 +1,9 @@
 import './style.css'
+import { renderSiteNav, initSiteNav, injectSiteNavStyles } from '@figureskatingtools/shared-ui';
 import { validateCategory, validateCompetition } from './validate';
+
+// Inject the shared figureskatingtools.com nav styles once at startup
+injectSiteNavStyles();
 
 /** Escape HTML special characters to prevent XSS */
 function escapeHtml(str: string): string {
@@ -64,19 +68,11 @@ function isMupiCategory(categoryCode: string): boolean {
 
 const appElement = document.querySelector<HTMLDivElement>('#app')!;
 
-// Initial basic layout structure
+// Initial basic layout structure. The site nav (shared across all
+// figureskatingtools.com apps) is rendered into #site-nav-container by init()
+// once the auth state is known.
 appElement.innerHTML = `
-  <header>
-    <div class="brand" id="brand-link" style="cursor: pointer;">Judge Paper Creator</div>
-    <nav id="main-nav" style="flex: 1; margin-left: 2rem; display: flex; gap: 1rem;" class="hidden">
-        <button id="nav-list" class="btn btn-sm btn-ghost">Competitions</button>
-        <button id="nav-create" class="btn btn-sm btn-ghost">New Competition</button>
-    </nav>
-    <div id="user-section">
-        <!-- User button will be injected here -->
-        <span style="font-size: 0.875rem; color: var(--text-secondary);">Loading...</span>
-    </div>
-  </header>
+  <div id="site-nav-container"></div>
 
   <main>
     <div id="loading-view" class="loading-screen">
@@ -256,8 +252,7 @@ async function init() {
   const errorView = document.getElementById('error-view')!;
   const landingView = document.getElementById('landing-view')!;
   const mainContent = document.getElementById('main-content')!;
-  const userSection = document.getElementById('user-section')!;
-  const mainNav = document.getElementById('main-nav')!;
+  const navContainer = document.getElementById('site-nav-container')!;
 
   try {
     // 1. Get Auth Info (server-side endpoint reads Easy Auth headers, no tokens exposed)
@@ -265,7 +260,7 @@ async function init() {
     try {
         const response = await fetch('/userinfo');
         const userInfo = await response.json();
-        
+
         if (userInfo && userInfo.authenticated) {
             clientPrincipal = {
                 userId: userInfo.userId || '',
@@ -278,6 +273,21 @@ async function init() {
         // parsing failed, assume unauthenticated
     }
 
+    // 2. Render the shared site nav. The in-app dropdown (Competitions /
+    // New Competition) is only shown once authenticated.
+    navContainer.innerHTML = renderSiteNav({
+        activeApp: 'judgepapers',
+        logoUrl: '/logo.png',
+        ...(clientPrincipal ? {
+            appNavItems: [
+                { id: 'competitions', label: 'Competitions', enabled: true },
+                { id: 'new-competition', label: 'New Competition', enabled: true },
+            ]
+        } : {})
+    });
+    initSiteNav();
+    const userSection = document.getElementById('fst-nav-right')!;
+
     if (!clientPrincipal) {
         // Not authenticated
         userSection.innerHTML = `<a href="/.auth/login/aad" class="btn btn-primary btn-sm">Sign In</a>`;
@@ -286,20 +296,16 @@ async function init() {
         return;
     }
 
-    // 2. Setup User Menu
+    // 3. Setup User Menu
     setupUserMenu(userSection, clientPrincipal);
 
-    // 3. Auth Success - Show Content
+    // 4. Auth Success - Show Content
     // We rely on SWA Entra ID authentication. If we are here, we are authenticated.
     loadingView.classList.add('hidden');
     mainContent.classList.remove('hidden');
-    mainNav.classList.remove('hidden');
 
     // Load categories cache from API (table-driven config)
     await loadCategoriesCache();
-
-    // Navigation Event Listeners
-    document.getElementById('brand-link')?.addEventListener('click', () => showView('view-welcome'));
 
     const loadCompetitions = async () => {
         showView('view-competitions');
@@ -1157,10 +1163,21 @@ async function init() {
     });
 
 
-    document.getElementById('nav-list')?.addEventListener('click', loadCompetitions);
+    // Shared-nav dropdown items (rendered by renderSiteNav with data-nav-action)
+    document.querySelectorAll<HTMLElement>('[data-nav-action]').forEach(el => {
+        el.addEventListener('click', (e) => {
+            e.preventDefault();
+            // Close the nav dropdown (its own click handler stops propagation)
+            document.querySelectorAll('.fst-dropdown-menu').forEach(m => m.classList.remove('fst-dropdown-menu--open'));
+            document.querySelectorAll('.fst-nav-item-btn[data-dropdown]').forEach(t => t.setAttribute('aria-expanded', 'false'));
 
-    document.getElementById('nav-create')?.addEventListener('click', () => showView('view-create-competition'));
-    
+            const action = (e.currentTarget as HTMLElement).dataset.navAction;
+            if (action === 'competitions') loadCompetitions();
+            else if (action === 'new-competition') showView('view-create-competition');
+        });
+    });
+
+
     document.getElementById('action-btn')?.addEventListener('click', loadCompetitions);
     document.getElementById('btn-create-comp')?.addEventListener('click', () => showView('view-create-competition'));
     

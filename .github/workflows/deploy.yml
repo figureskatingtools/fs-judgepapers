@@ -7,6 +7,7 @@ on:
 permissions:
   id-token: write
   contents: read
+  packages: read
 
 jobs:
   set-environment:
@@ -200,8 +201,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@figureskatingtools'
 
       - name: Build frontend
+        env:
+          # Auth for @figureskatingtools/shared-ui on GitHub Packages
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd frontend
           npm ci

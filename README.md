@@ -104,9 +104,14 @@ This starts the Azure Functions backend, the Vite dev server, and SWA CLI for lo
 3. **Frontend:**
     ```bash
     cd frontend
-    npm install
+    NODE_AUTH_TOKEN=$(gh auth token) npm install   # token needs read:packages scope
     npm run dev
     ```
+
+    > The frontend consumes `@figureskatingtools/shared-ui` (the shared site
+    > navigation) from GitHub Packages, which requires an authenticated token
+    > with `read:packages` even for installs. Grant the scope once with
+    > `gh auth refresh -s read:packages`, or use a classic PAT.
 
 ## Project Structure
 
