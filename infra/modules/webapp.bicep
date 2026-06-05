@@ -83,3 +83,6 @@ output webAppName string = webApp.name
 output webAppDefaultHostName string = webApp.properties.defaultHostName
 output customDomainVerificationId string = webApp.properties.customDomainVerificationId
 output appServicePlanId string = appServicePlan.id
+// Comma-separated set of IPs the Web App can make outbound calls from.
+// Used to lock the Function App down to proxy traffic only (see function.bicep).
+output possibleOutboundIpAddresses string = webApp.properties.possibleOutboundIpAddresses

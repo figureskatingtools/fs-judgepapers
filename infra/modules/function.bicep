@@ -10,6 +10,21 @@ param authManagedIdentityClientId string = ''
 param authManagedIdentityResourceId string = ''
 param tenantId string = ''
 
+// Comma-separated list of the Web App's outbound IPs. When set, the Function
+// App only accepts inbound traffic from these IPs (i.e. only via the Web App
+// proxy). Empty = no IP restriction.
+param allowedOutboundIps string = ''
+
+var outboundIpList = empty(allowedOutboundIps) ? [] : split(allowedOutboundIps, ',')
+var ipSecurityRestrictions = [
+  for (ip, i) in outboundIpList: {
+    ipAddress: '${ip}/32'
+    action: 'Allow'
+    priority: 100 + i
+    name: 'webapp-outbound-${i}'
+  }
+]
+
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: appServicePlanName
   location: location
@@ -47,6 +62,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       cors: {
         allowedOrigins: allowedOrigins
       }
+      // Lock inbound traffic to the Web App's outbound IPs (proxy only).
+      // Leaves the SCM/deployment endpoint unrestricted so CI can still deploy.
+      ipSecurityRestrictions: empty(allowedOutboundIps) ? null : ipSecurityRestrictions
+      ipSecurityRestrictionsDefaultAction: empty(allowedOutboundIps) ? null : 'Deny'
       appSettings: [
         {
           name: 'AzureWebJobsStorage__accountName'
@@ -88,9 +107,15 @@ resource authSettings 'Microsoft.Web/sites/config@2022-03-01' = {
   parent: functionApp
   name: 'authsettingsV2'
   properties: {
+    // The Web App handles the real Entra login and proxies requests here,
+    // forwarding the user's email. The Function App must allow anonymous so
+    // those proxied requests reach the app, which authorizes via the forwarded
+    // header (get_user_email_from_header). Inbound access is locked to the Web
+    // App's IPs (ipSecurityRestrictions above). The AAD provider stays enabled
+    // so a bearer token is still validated when one is present.
     globalValidation: {
-      requireAuthentication: true
-      unauthenticatedClientAction: 'RedirectToLoginPage'
+      requireAuthentication: false
+      unauthenticatedClientAction: 'AllowAnonymous'
     }
     identityProviders: {
       azureActiveDirectory: {

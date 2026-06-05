@@ -52,6 +52,8 @@ Three pieces, deployed separately:
 
 All function routes are `AuthLevel.ANONYMOUS`; real auth is Entra ID Easy Auth on the Web App. Identity flows: Easy Auth injects `X-MS-CLIENT-PRINCIPAL*` headers → `server.js` extracts the email and forwards it as `X-Forwarded-User-Email` to the Function App → `get_user_email_from_header()` in `function_app.py` tries (in order) direct Easy Auth header, forwarded header, base64 SWA principal, then Bearer JWT claims. Every endpoint must call it and return 401 on `None`. `is_user_allowed()` currently allows all authenticated users and is the hook for a future allowlist.
 
+**The Function App itself must be `AllowAnonymous`** (`function.bicep` `globalValidation`), *not* `requireAuthentication: true` — the proxy forwards only the email header, no bearer token, so Easy Auth enforcement would 401 every proxied request (`WWW-Authenticate: Bearer`, empty body) before the app's header check runs. Because that leaves the public `*.azurewebsites.net` endpoint trusting a forwardable header, the Function App is **IP-locked to the Web App's `possibleOutboundIpAddresses`** via `ipSecurityRestrictions` (default Deny; SCM endpoint left open for CI deploys). If the Web App's outbound IPs change (SKU/scale change), re-run the infra deploy to refresh the allow-list.
+
 ### Storage layout & dual credential pattern
 
 Blob container `fs-judgepapers`:
