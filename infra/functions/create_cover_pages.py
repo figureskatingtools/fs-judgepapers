@@ -10,6 +10,9 @@ from reportlab.lib.units import mm
 
 # --- Helper Functions ---
 
+FOOTER_TEXT = "Created with Figureskatingtools.com - Supporting the Figure Skating Community"
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+
 def slugify(text):
     text = text.lower()
     replacements = {
@@ -115,42 +118,54 @@ def extract_title_from_pdf(pdf_path):
 
 # --- PDF Generation ---
 
+def _draw_footer(c, x_start, x_end, footer_y_line=25 * mm, footer_y_text=20 * mm):
+    c.setLineWidth(0.5)
+    c.line(x_start, footer_y_line, x_end, footer_y_line)
+
+    # Shrink font from 8pt until the text fits the available width
+    size = 8
+    while size > 5 and c.stringWidth(FOOTER_TEXT, "Helvetica", size) > (x_end - x_start):
+        size -= 0.5
+    c.setFont("Helvetica", size)
+    c.drawRightString(x_end, footer_y_text, FOOTER_TEXT)
+
 def create_cover_pdf(output_path, competition_name, date_obj, person_name):
     c = canvas.Canvas(output_path, pagesize=landscape(A4))
     width, height = landscape(A4)
-    
+
     # Layout settings
     # "second column should have some space after the center of page"
     # Center X is width/2. Let's start text at width/2 + 10mm
     x_pos = width / 2 + 10 * mm
-    
+
     # Vertical position: Middle of page
     y_start = height / 2 + 20 * mm
     line_height = 10 * mm # Space between lines
-    
+
+    # Logo header at the top of the page (best-effort; never fail cover generation over the asset)
+    logo_w = 50 * mm
+    logo_h = logo_w * 412 / 655  # preserve the 655x412 px aspect ratio
+    try:
+        c.drawImage(LOGO_PATH, x_pos, height - 10 * mm - logo_h, width=logo_w, height=logo_h,
+                    preserveAspectRatio=True, anchor='sw', mask='auto')
+    except Exception as e:
+        print(f"Could not draw logo on cover page: {e}")
+
     c.setFont("Helvetica", 12)
-    
+
     # Draw Competition Name
     c.drawString(x_pos, y_start, competition_name)
-    
+
     # Draw Date (dd.MM.yyyy)
     date_str = date_obj.strftime("%d.%m.%Y")
     c.drawString(x_pos, y_start - line_height, date_str)
-    
+
     # Draw Person Name
     c.drawString(x_pos, y_start - 2 * line_height, person_name)
-    
+
     # Footer
-    footer_y_line = 25 * mm
-    footer_y_text = 20 * mm
-    x_end = width - 10 * mm
-    
-    c.setLineWidth(0.5)
-    c.line(x_pos, footer_y_line, x_end, footer_y_line)
-    
-    c.setFont("Helvetica", 8)
-    c.drawRightString(x_end, footer_y_text, "Created with JudgePaperCreator - Supporting the Figure Skating Community")
-    
+    _draw_footer(c, x_pos, width - 10 * mm)
+
     c.save()
 
 def create_segment_cover_pdf(output_path, competition_name, date_obj, segment_name, category_name=None, withdrawn_competitors=None):
@@ -194,17 +209,8 @@ def create_segment_cover_pdf(output_path, competition_name, date_obj, segment_na
             c.drawCentredString(center_x, y_pos, name)
     
     # Footer
-    footer_y_line = 25 * mm
-    footer_y_text = 20 * mm
-    x_start = 10 * mm
-    x_end = width - 10 * mm
-    
-    c.setLineWidth(0.5)
-    c.line(x_start, footer_y_line, x_end, footer_y_line)
-    
-    c.setFont("Helvetica", 8)
-    c.drawRightString(x_end, footer_y_text, "Created with JudgePaperCreator - Supporting the Figure Skating Community")
-    
+    _draw_footer(c, 10 * mm, width - 10 * mm)
+
     c.save()
 
 
