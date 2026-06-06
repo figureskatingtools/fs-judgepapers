@@ -12,8 +12,9 @@ from datetime import datetime
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from azure.identity import DefaultAzureCredential
 from azure.core.exceptions import ResourceNotFoundError
-from azure.data.tables import TableClient
+from azure.data.tables import TableClient, UpdateMode
 from datetime import datetime, timedelta
+from uuid import uuid4
 from processor import process_judging_papers
 from categories import load_categories, match_category, parse_filename_generic
 from competition_schedule import parse_competition_schedule, get_schedule_start_time
@@ -176,6 +177,100 @@ def get_table_client(table_name="generatedpapers"):
         logging.error(f"Failed to create table client: {e}")
         return None
 
+def sanitize_name(name: str) -> str:
+    """Sanitize a competition display name: keep alphanumerics, spaces, hyphens, underscores."""
+    return "".join([c for c in name if c.isalnum() or c in (' ', '-', '_')]).strip()
+
+
+def generate_competition_id(comp_table) -> str:
+    """Generate a unique 8-char hex competition id (checked against the competitions table)."""
+    for _ in range(5):
+        cid = uuid4().hex[:8]
+        try:
+            comp_table.get_entity(partition_key="GLOBAL", row_key=cid)
+        except ResourceNotFoundError:
+            return cid
+    raise RuntimeError("Could not generate a unique competition id")
+
+
+def get_competition_entity(comp_id: str):
+    """Look up a competition entity by its id (RowKey). Returns None if not found."""
+    try:
+        comp_table = get_table_client("competitions")
+        if not comp_table:
+            return None
+        return comp_table.get_entity(partition_key="GLOBAL", row_key=comp_id)
+    except ResourceNotFoundError:
+        return None
+    except Exception as e:
+        logging.error(f"Error fetching competition entity {comp_id}: {e}")
+        return None
+
+
+def _bump_competition_counters(comp_id, uploaded_delta=0, generate_delta=0, set_last_generated=False):
+    """
+    Best-effort update of usage counters on the competitions entity.
+    Never raises — counter failures must not fail the user's operation.
+    """
+    try:
+        comp_table = get_table_client("competitions")
+        if not comp_table:
+            return
+        entity = comp_table.get_entity(partition_key="GLOBAL", row_key=comp_id)
+        update = {"PartitionKey": "GLOBAL", "RowKey": comp_id}
+        if uploaded_delta:
+            update["UploadedFileCount"] = max(0, int(entity.get("UploadedFileCount", 0)) + uploaded_delta)
+        if generate_delta:
+            update["GenerateRunCount"] = int(entity.get("GenerateRunCount", 0)) + generate_delta
+        if set_last_generated:
+            update["LastGeneratedDate"] = f"{datetime.utcnow().isoformat()}Z"
+        comp_table.update_entity(update, mode=UpdateMode.MERGE)
+    except Exception as e:
+        logging.warning(f"Failed to update counters for competition {comp_id}: {e}")
+
+
+def migrate_legacy_row(comp_table, entity):
+    """
+    Migrate a legacy competitions row (RowKey = competition name, name-based blob
+    folder) to the id-keyed schema. Azure Tables cannot rename a RowKey, so a new
+    entity is created and the old one deleted. The blob folder is left untouched;
+    FolderPath points at it. generatedpapers rows are re-keyed name -> id.
+    Returns the new entity.
+    """
+    old_name = entity["RowKey"]
+    new_id = generate_competition_id(comp_table)
+    logging.info(f"Migrating legacy competition '{old_name}' to id {new_id}")
+
+    new_entity = {
+        "PartitionKey": "GLOBAL",
+        "RowKey": new_id,
+        "Name": entity.get("Name", old_name),
+        "FolderPath": old_name,
+        "Visible": True,
+        "CreatedBy": entity.get("CreatedBy", "-"),
+        "CreatedDate": entity.get("CreatedDate", "-"),
+        "UploadedFileCount": 0,
+        "GenerateRunCount": 0
+    }
+
+    # Re-key generatedpapers rows (PartitionKey: old name -> new id)
+    try:
+        papers_table = get_table_client()
+        if papers_table:
+            safe_pk = old_name.replace("'", "''")
+            for paper in list(papers_table.query_entities(f"PartitionKey eq '{safe_pk}'")):
+                new_paper = dict(paper)
+                new_paper["PartitionKey"] = new_id
+                papers_table.upsert_entity(new_paper)
+                papers_table.delete_entity(partition_key=old_name, row_key=paper["RowKey"])
+    except Exception as e:
+        logging.warning(f"Failed to re-key generatedpapers rows for '{old_name}': {e}")
+
+    comp_table.create_entity(new_entity)
+    comp_table.delete_entity(partition_key="GLOBAL", row_key=old_name)
+    return new_entity
+
+
 def create_and_store_sas_link(blob_service_client, container_name, blob_name, competition, filename, file_size=0):
     try:
         table_client = get_table_client()
@@ -259,82 +354,36 @@ def list_competitions(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Unauthorized", status_code=401)
 
     try:
+        # The competitions table is the source of truth (permanent history).
+        # Rows with Visible=False (soft-deleted) are kept for statistics but hidden here.
+        table_client = get_table_client("competitions")
+        if not table_client:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+
+        # Ensure table exists
+        try: table_client.create_table()
+        except: pass
+
         competitions = []
-        use_blob_storage_fallback = True
-        table_client = None
+        for entity in list(table_client.query_entities("PartitionKey eq 'GLOBAL'")):
+            # Lazily migrate legacy rows (RowKey = name) to the id-keyed schema
+            if "FolderPath" not in entity:
+                try:
+                    entity = migrate_legacy_row(table_client, entity)
+                except Exception as e:
+                    logging.error(f"Failed to migrate legacy competition '{entity['RowKey']}': {e}")
 
-        # Try reading from Table Storage first
-        try:
-            table_client = get_table_client("competitions")
-            if table_client:
-                # Ensure table exists
-                try: table_client.create_table()
-                except: pass
+            # Hide soft-deleted competitions
+            if entity.get("Visible") is False:
+                continue
 
-                entities = table_client.query_entities("PartitionKey eq 'GLOBAL'")
-                for entity in entities:
-                    competitions.append({
-                        "name": entity.get("Name", entity["RowKey"]),
-                        "createdBy": entity.get("CreatedBy", "-"),
-                        "createdDate": entity.get("CreatedDate", "-")
-                    })
-                
-                # If we found competitions in the table, we don't need to scan blobs
-                # unless the table is empty, in which case we might be migrating
-                if competitions:
-                    use_blob_storage_fallback = False
-        except Exception as e:
-            logging.warning(f"Failed to query competitions table: {e}")
+            competitions.append({
+                "id": entity["RowKey"],
+                "name": entity.get("Name", entity["RowKey"]),
+                "createdBy": entity.get("CreatedBy", "-"),
+                "createdDate": entity.get("CreatedDate", "-")
+            })
 
-        if use_blob_storage_fallback:
-            logging.info("Falling back to Blob Storage scan for competitions...")
-            blob_service_client = get_blob_service_client()
-            if not blob_service_client:
-                 return func.HttpResponse("Storage configuration invalid", status_code=500)
-
-            container_name = "fs-judgepapers"
-            container_client = blob_service_client.get_container_client(container_name)
-            
-            if not container_client.exists():
-                 return func.HttpResponse("[]", mimetype="application/json")
-
-            # Walk blobs with delimiter to find "folders"
-            for item in container_client.walk_blobs(delimiter='/'):
-                if item.name.endswith('/'):
-                    name = item.name.rstrip('/')
-                    comp_data = {
-                        "name": name,
-                        "createdBy": "-",
-                        "createdDate": "-"
-                    }
-                    
-                    # Check for metadata.json
-                    try:
-                        metadata_blob = container_client.get_blob_client(f"{name}/metadata.json")
-                        if metadata_blob.exists():
-                             stream = metadata_blob.download_blob().readall()
-                             meta = json.loads(stream)
-                             comp_data["createdBy"] = meta.get("createdBy", "-")
-                             comp_data["createdDate"] = meta.get("createdDate", "-")
-                    except Exception:
-                        pass
-                    
-                    competitions.append(comp_data)
-                    
-                    # Backfill table
-                    if table_client:
-                        try:
-                            entity = {
-                                "PartitionKey": "GLOBAL", 
-                                "RowKey": name,
-                                "Name": name,
-                                "CreatedBy": comp_data["createdBy"],
-                                "CreatedDate": comp_data["createdDate"]
-                            }
-                            table_client.upsert_entity(entity)
-                        except Exception as e:
-                            logging.error(f"Failed to backfill competition {name}: {e}")
-                
         return func.HttpResponse(json.dumps(competitions), mimetype="application/json")
     except Exception as e:
         logging.error(f"Error listing competitions: {e}")
@@ -353,8 +402,8 @@ def create_competition(req: func.HttpRequest) -> func.HttpResponse:
     if not name:
         return func.HttpResponse("Missing name parameter", status_code=400)
     
-    # Sanitize name
-    safe_name = "".join([c for c in name if c.isalnum() or c in (' ', '-', '_')]).strip()
+    # Sanitize name (names are NOT unique — the id is the identifier)
+    safe_name = sanitize_name(name)
     if not safe_name:
          return func.HttpResponse("Invalid name", status_code=400)
 
@@ -363,38 +412,44 @@ def create_competition(req: func.HttpRequest) -> func.HttpResponse:
         if not blob_service_client:
              return func.HttpResponse("Storage configuration invalid", status_code=500)
 
+        comp_table = get_table_client("competitions")
+        if not comp_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+
+        # Ensure table exists
+        try: comp_table.create_table()
+        except: pass
+
+        new_id = generate_competition_id(comp_table)
+        folder_path = f"{safe_name}-{new_id}"
+
         container = blob_service_client.get_container_client("fs-judgepapers")
-        
+
         # Create metadata.json file to establish the "folder"
-        blob_path = f"{safe_name}/metadata.json"
-        
         metadata = {
+            "id": new_id,
+            "name": safe_name,
             "createdBy": email,
             "createdDate": f"{datetime.utcnow().isoformat()}Z"
         }
-        
-        container.upload_blob(blob_path, json.dumps(metadata, indent=4), overwrite=True)
-        
-        # Add to competitions table for faster listing
-        try:
-            comp_table = get_table_client("competitions")
-            if comp_table:
-                # Ensure table exists
-                try: comp_table.create_table()
-                except: pass
-                
-                entity = {
-                    "PartitionKey": "GLOBAL", 
-                    "RowKey": safe_name,
-                    "Name": safe_name,
-                    "CreatedBy": metadata["createdBy"],
-                    "CreatedDate": metadata["createdDate"]
-                }
-                comp_table.upsert_entity(entity)
-        except Exception as e:
-            logging.error(f"Failed to update competitions table: {e}")
 
-        return func.HttpResponse(json.dumps({"name": safe_name}), mimetype="application/json")
+        container.upload_blob(f"{folder_path}/metadata.json", json.dumps(metadata, indent=4), overwrite=True)
+
+        # Permanent history row — never deleted, only hidden via Visible=False
+        entity = {
+            "PartitionKey": "GLOBAL",
+            "RowKey": new_id,
+            "Name": safe_name,
+            "FolderPath": folder_path,
+            "Visible": True,
+            "CreatedBy": metadata["createdBy"],
+            "CreatedDate": metadata["createdDate"],
+            "UploadedFileCount": 0,
+            "GenerateRunCount": 0
+        }
+        comp_table.create_entity(entity)
+
+        return func.HttpResponse(json.dumps({"id": new_id, "name": safe_name}), mimetype="application/json")
     except Exception as e:
         logging.error(f"Error creating competition: {e}")
         return func.HttpResponse("Internal server error", status_code=500)
@@ -408,45 +463,52 @@ def delete_competition(req: func.HttpRequest) -> func.HttpResponse:
     if not email:
         return func.HttpResponse("Unauthorized", status_code=401)
         
-    name = req.params.get('name')
-    if not name:
-        return func.HttpResponse("Missing name parameter", status_code=400)
+    comp_id = req.params.get('id')
+    if not comp_id:
+        return func.HttpResponse("Missing id parameter", status_code=400)
 
     try:
+        entity = get_competition_entity(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+
+        folder_path = entity.get("FolderPath", entity["RowKey"])
+
         blob_service_client = get_blob_service_client()
         if not blob_service_client: return func.HttpResponse("Config Error", status_code=500)
-        
+
         container = blob_service_client.get_container_client("fs-judgepapers")
-        
+
         # List all blobs with this prefix and delete them
-        blobs = container.list_blobs(name_starts_with=f"{name}/")
+        blobs = container.list_blobs(name_starts_with=f"{folder_path}/")
         count = 0
         for blob in blobs:
             container.delete_blob(blob.name)
             count += 1
-            
-        # Delete table entities for this competition
+
+        # Delete generated-papers table entities for this competition
         try:
             table_client = get_table_client()
             if table_client:
-                # Query all entities for this partition key
-                safe_pk = name.replace("'", "''")
+                safe_pk = comp_id.replace("'", "''")
                 entities = table_client.query_entities(f"PartitionKey eq '{safe_pk}'")
                 table_count = 0
-                for entity in entities:
-                    table_client.delete_entity(partition_key=entity['PartitionKey'], row_key=entity['RowKey'])
+                for paper in entities:
+                    table_client.delete_entity(partition_key=paper['PartitionKey'], row_key=paper['RowKey'])
                     table_count += 1
-                logging.info(f"Deleted {table_count} table rows for competition {name}")
+                logging.info(f"Deleted {table_count} table rows for competition {comp_id}")
         except Exception as table_err:
             logging.warning(f"Error deleting table entities: {table_err}")
 
-        # Delete from competitions table
-        try:
-            comp_table = get_table_client("competitions")
-            if comp_table:
-                comp_table.delete_entity(partition_key="GLOBAL", row_key=name)
-        except Exception as e:
-             logging.warning(f"Error deleting from competitions table (or not found): {e}")
+        # Keep the competitions row as permanent history: hide it and record the deletion
+        comp_table = get_table_client("competitions")
+        comp_table.update_entity({
+            "PartitionKey": "GLOBAL",
+            "RowKey": comp_id,
+            "Visible": False,
+            "DeletedDate": f"{datetime.utcnow().isoformat()}Z",
+            "DeletedBy": email
+        }, mode=UpdateMode.MERGE)
 
         return func.HttpResponse(json.dumps({"deleted": count}), mimetype="application/json")
     except Exception as e:
@@ -505,31 +567,38 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
     if not email:
         return func.HttpResponse("Unauthorized", status_code=401)
         
-    name = req.params.get('name')
-    if not name:
-        return func.HttpResponse("Missing name parameter", status_code=400)
+    comp_id = req.params.get('id')
+    if not comp_id:
+        return func.HttpResponse("Missing id parameter", status_code=400)
 
     try:
+        entity = get_competition_entity(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+
+        folder_path = entity.get("FolderPath", entity["RowKey"])
+        display_name = entity.get("Name", folder_path)
+
         blob_service_client = get_blob_service_client()
         if not blob_service_client: return func.HttpResponse("Config Error", status_code=500)
-        
+
         container = blob_service_client.get_container_client("fs-judgepapers")
-        
+
         # Pre-load categories once for all files
         categories = _get_categories()
 
         # Load competition settings from metadata.json
         competition_language = 'fi'  # Default to Finnish
         try:
-            metadata_blob = container.get_blob_client(f"{name}/metadata.json")
+            metadata_blob = container.get_blob_client(f"{folder_path}/metadata.json")
             if metadata_blob.exists():
                 meta_stream = metadata_blob.download_blob().readall()
                 meta = json.loads(meta_stream)
                 competition_language = meta.get('language', 'fi')
         except Exception:
             pass
-        
-        blobs = container.list_blobs(name_starts_with=f"{name}/")
+
+        blobs = container.list_blobs(name_starts_with=f"{folder_path}/")
         
         files_data = []
         structure = {} # { category: { segment: [files] } }
@@ -546,9 +615,9 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
 
         for blob in blobs:
             # Filter out files in subfolders (only process root of competition folder)
-            # blob.name is "{name}/{filename}"
-            # We want to skip "{name}/{subfolder}/{filename}"
-            if '/' in blob.name[len(name)+1:]:
+            # blob.name is "{folder_path}/{filename}"
+            # We want to skip "{folder_path}/{subfolder}/{filename}"
+            if '/' in blob.name[len(folder_path)+1:]:
                 continue
 
             # Skip the init.md or metadata.json file
@@ -771,13 +840,12 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
         if len(detected_names) > 1:
             alerts.append(f"Multiple competition names found: {', '.join(detected_names)}")
 
-        # Fetch generated links
+        # Fetch generated links (keyed by competition id)
         generated_links = []
         try:
             table_client = get_table_client()
             if table_client:
-                 pk = name.strip("/")
-                 safe_pk = pk.replace("'", "''")
+                 safe_pk = comp_id.replace("'", "''")
                  try:
                      entities = table_client.query_entities(f"PartitionKey eq '{safe_pk}'")
                      for entity in entities:
@@ -797,7 +865,8 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
         competition_files = [f for f in files_data if f.get('type') == 'Competition']
 
         return func.HttpResponse(json.dumps({
-            "name": name,
+            "id": comp_id,
+            "name": display_name,
             "fullName": comp_full_name,
             "type": comp_type_display,
             "date": comp_date_display,
@@ -825,21 +894,27 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         req_body = req.get_json()
-        competition_name = req_body.get('name')
+        comp_id = req_body.get('id')
         settings = req_body.get('settings', {})
     except ValueError:
         return func.HttpResponse("Invalid JSON body", status_code=400)
 
-    if not competition_name:
-        return func.HttpResponse("Missing name parameter", status_code=400)
+    if not comp_id:
+        return func.HttpResponse("Missing id parameter", status_code=400)
 
     try:
+        entity = get_competition_entity(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+
+        folder_path = entity.get("FolderPath", entity["RowKey"])
+
         blob_service_client = get_blob_service_client()
         if not blob_service_client:
             return func.HttpResponse("Storage configuration error", status_code=500)
 
         container = blob_service_client.get_container_client("fs-judgepapers")
-        metadata_blob = container.get_blob_client(f"{competition_name}/metadata.json")
+        metadata_blob = container.get_blob_client(f"{folder_path}/metadata.json")
 
         # Read existing metadata
         existing_meta = {}
@@ -856,7 +931,7 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
 
         # Write back
         container.upload_blob(
-            f"{competition_name}/metadata.json",
+            f"{folder_path}/metadata.json",
             json.dumps(existing_meta, indent=4),
             overwrite=True
         )
@@ -881,13 +956,20 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         req_body = req.get_json()
-        working_folder = req_body.get('workingFolder')
-        options = req_body.get('options', {}) 
+        # workingFolder carries the competition id; the blob folder is resolved from the table
+        comp_id = req_body.get('workingFolder')
+        options = req_body.get('options', {})
     except ValueError:
         return func.HttpResponse("Invalid JSON body", status_code=400)
 
-    if not working_folder:
+    if not comp_id:
         return func.HttpResponse("Please pass a workingFolder in the request body", status_code=400)
+
+    entity = get_competition_entity(comp_id)
+    if not entity:
+        return func.HttpResponse("Competition not found", status_code=404)
+
+    working_folder = entity.get("FolderPath", entity["RowKey"])
 
     # Connect to Blob Storage
     try:
@@ -959,10 +1041,12 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
                 
                 # Check for generate files (PDF summaries or ZIPs)
                 if file.lower().endswith('.zip') or (file.lower().startswith('judgingpapers_') and file.lower().endswith('.pdf')):
-                     create_and_store_sas_link(blob_service_client, "fs-judgepapers", blob_name, clean_working_folder, file, file_size)
-                
+                     create_and_store_sas_link(blob_service_client, "fs-judgepapers", blob_name, comp_id, file, file_size)
+
         logging.info(f"Uploaded {upload_count} files.")
-        
+
+        _bump_competition_counters(comp_id, generate_delta=1, set_last_generated=True)
+
         return func.HttpResponse(f"Successfully processed {download_count} files and generated {upload_count} output files.", status_code=200)
 
     except Exception as e:
@@ -999,19 +1083,28 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         file_content = req.get_body()
-        
+
         if len(file_content) > MAX_UPLOAD_SIZE:
             return func.HttpResponse(f"File too large. Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.", status_code=413)
-        
+
+        # 'competition' carries the competition id; resolve the blob folder from the table
+        entity = get_competition_entity(competition)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+
+        folder_path = entity.get("FolderPath", entity["RowKey"])
+
         blob_service_client = get_blob_service_client()
         if not blob_service_client: return func.HttpResponse("Config Error", status_code=500)
-        
+
         container = blob_service_client.get_container_client("fs-judgepapers")
-        
-        blob_path = f"{competition}/{filename}"
-        
+
+        blob_path = f"{folder_path}/{filename}"
+
         container.upload_blob(blob_path, file_content, overwrite=True)
-        
+
+        _bump_competition_counters(competition, uploaded_delta=1)
+
         return func.HttpResponse(json.dumps({"filename": filename, "status": "uploaded"}), mimetype="application/json")
     except Exception as e:
         logging.error(f"Error uploading file: {e}")
@@ -1032,16 +1125,23 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Missing competition or filename", status_code=400)
 
     try:
+        # 'competition' carries the competition id; resolve the blob folder from the table
+        entity = get_competition_entity(competition)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+
+        folder_path = entity.get("FolderPath", entity["RowKey"])
+
         blob_service_client = get_blob_service_client()
         if not blob_service_client: return func.HttpResponse("Config Error", status_code=500)
-        
+
         container = blob_service_client.get_container_client("fs-judgepapers")
-        
-        blob_path = f"{competition}/{filename}"
-        
+
+        blob_path = f"{folder_path}/{filename}"
+
         if container.get_blob_client(blob_path).exists():
             container.delete_blob(blob_path)
-            
+
             # Try to delete associated table entity (if distinct generated file)
             try:
                 table_client = get_table_client()
@@ -1055,6 +1155,10 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
                 pass
             except Exception as table_err:
                 logging.warning(f"Error deleting table entity: {table_err}")
+
+            # Only source uploads count toward UploadedFileCount (not generated outputs)
+            if not filename.startswith('judgePapers/'):
+                _bump_competition_counters(competition, uploaded_delta=-1)
 
             return func.HttpResponse(json.dumps({"status": "deleted"}), mimetype="application/json")
         else:

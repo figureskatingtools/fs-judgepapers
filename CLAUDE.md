@@ -58,12 +58,14 @@ Because the function endpoint is public, a **shared secret** stops anyone from c
 
 ### Storage layout & dual credential pattern
 
-Blob container `fs-judgepapers`:
-- `{competition}/metadata.json` — createdBy/createdDate/language; its existence defines the competition "folder"
-- `{competition}/{PREFIX}_{Suffix}.pdf` — uploaded FSM exports
-- `{competition}/judgePapers/...` — generated output (ZIPs + merged PDFs get 5-day SAS links)
+Every competition has an immutable 8-char hex **id** (`uuid4().hex[:8]`) — the identifier in all API calls and table keys. Competition **names are not unique** (trial-and-error re-creation is allowed); the blob folder is `{sanitized-name}-{id}/`, stored on the entity as `FolderPath` (endpoints resolve id → FolderPath via `get_competition_entity`).
 
-Tables: `competitions` (listing index, PartitionKey `GLOBAL`; blob scan is the fallback + backfill), `generatedpapers` (SAS download links, PartitionKey = competition name), `categories` (the category registry).
+Blob container `fs-judgepapers`:
+- `{name}-{id}/metadata.json` — id/name/createdBy/createdDate/language; its existence defines the competition "folder"
+- `{name}-{id}/{PREFIX}_{Suffix}.pdf` — uploaded FSM exports
+- `{name}-{id}/judgePapers/...` — generated output (ZIPs + merged PDFs get 5-day SAS links)
+
+Tables: `competitions` is the **authoritative, permanent history** of every competition ever created (PartitionKey `GLOBAL`, RowKey = id; rows are never deleted — there is no blob-scan fallback anymore). Columns: `Name`, `FolderPath`, `Visible` (controls UI listing), `CreatedBy/CreatedDate`, `DeletedDate/DeletedBy`, and usage counters for statistics (`UploadedFileCount`, `GenerateRunCount`, `LastGeneratedDate`, maintained best-effort by `_bump_competition_counters`). Deleting a competition removes its blobs and `generatedpapers` rows but only soft-deletes the `competitions` row (`Visible=false` + delete audit). Legacy name-keyed rows are lazily migrated by `list_competitions` (`migrate_legacy_row`: new id-keyed row with `FolderPath` = old name folder, generatedpapers re-keyed). `generatedpapers` holds SAS download links (PartitionKey = competition id), `categories` is the category registry.
 
 Every storage client helper supports two credential modes and new storage code must too: managed identity when `AzureWebJobsStorage__accountName` is set (production; SAS via user-delegation key), connection string via `AzureWebJobsStorage` otherwise (local dev; SAS via account key).
 

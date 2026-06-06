@@ -344,8 +344,8 @@ async function init() {
                     <div class="comp-row-head">
                         <span class="comp-row-name">${escapeHtml(comp.name)}</span>
                         <div class="comp-row-actions">
-                            <button class="btn btn-sm btn-ghost open-comp-btn" data-comp="${escapeHtml(comp.name)}">Open</button>
-                            <button class="btn btn-sm btn-ghost btn-ghost--danger delete-comp-btn" data-comp="${escapeHtml(comp.name)}">Delete</button>
+                            <button class="btn btn-sm btn-ghost open-comp-btn" data-comp-id="${escapeHtml(comp.id)}" data-comp-name="${escapeHtml(comp.name)}">Open</button>
+                            <button class="btn btn-sm btn-ghost btn-ghost--danger delete-comp-btn" data-comp-id="${escapeHtml(comp.id)}" data-comp-name="${escapeHtml(comp.name)}">Delete</button>
                         </div>
                     </div>
                     <div class="comp-row-meta">
@@ -358,15 +358,15 @@ async function init() {
             // Add listeners to new buttons
             document.querySelectorAll('.open-comp-btn').forEach(btn => {
                 btn.addEventListener('click', (e) => {
-                    const comp = (e.currentTarget as HTMLElement).dataset.comp!;
-                    openCompetition(comp);
+                    const el = e.currentTarget as HTMLElement;
+                    openCompetition(el.dataset.compId!, el.dataset.compName!);
                 });
             });
 
             document.querySelectorAll('.delete-comp-btn').forEach(btn => {
                 btn.addEventListener('click', (e) => {
-                    const comp = (e.currentTarget as HTMLElement).dataset.comp!;
-                    openDeleteCompetitionModal(comp);
+                    const el = e.currentTarget as HTMLElement;
+                    openDeleteCompetitionModal(el.dataset.compId!, el.dataset.compName!);
                 });
             });
 
@@ -638,8 +638,8 @@ async function init() {
             const resp = await fetch('/api/generate_judging_papers', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    workingFolder: currentCompetitionData.name,
+                body: JSON.stringify({
+                    workingFolder: currentCompetitionData.id,
                     options: options
                 })
             });
@@ -653,7 +653,7 @@ async function init() {
                      btn.innerHTML = originalText;
                      btn.classList.remove('btn-success');
                      btn.disabled = false;
-                     loadCompetitionDetails(currentCompetitionData.name);
+                     loadCompetitionDetails(currentCompetitionData.id);
                  }, 3000);
             } else {
                 const errText = await resp.text();
@@ -672,15 +672,15 @@ async function init() {
     // Global handler
     (window as any).promptDeleteFile = (filename: string) => {
          if (!currentCompetitionData) return;
-         openDeleteFileModal(filename, currentCompetitionData.name);
+         openDeleteFileModal(filename, currentCompetitionData.id);
     };
 
-    async function loadCompetitionDetails(name: string) {
+    async function loadCompetitionDetails(id: string) {
         const container = document.getElementById('comp-files-container')!;
         container.innerHTML = '<p class="text-muted">Scanning files...</p>';
 
         try {
-            const resp = await fetch(`/api/get_competition_details?name=${encodeURIComponent(name)}`);
+            const resp = await fetch(`/api/get_competition_details?id=${encodeURIComponent(id)}`);
             if (!resp.ok) throw new Error('Failed to load details');
             
             const data = await resp.json();
@@ -907,7 +907,7 @@ async function init() {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            name: currentCompetitionData.name,
+                            id: currentCompetitionData.id,
                             settings: { language: currentLanguage }
                         })
                     });
@@ -949,7 +949,7 @@ async function init() {
         });
     }
 
-    async function handleFiles(files: FileList, competitionName: string) {
+    async function handleFiles(files: FileList, competitionId: string) {
         const statusEl = document.getElementById('upload-status')!;
         let successCount = 0;
         let errors: string[] = [];
@@ -964,7 +964,7 @@ async function init() {
             }
             
             try {
-                const url = `/api/upload_file?competition=${encodeURIComponent(competitionName)}&filename=${encodeURIComponent(file.name)}`;
+                const url = `/api/upload_file?competition=${encodeURIComponent(competitionId)}&filename=${encodeURIComponent(file.name)}`;
                 const resp = await fetch(url, {
                     method: 'POST',
                     body: file 
@@ -987,14 +987,14 @@ async function init() {
         statusEl.innerHTML = msg;
         
         if (successCount > 0) {
-             loadCompetitionDetails(competitionName);
+             loadCompetitionDetails(competitionId);
         }
     }
 
-    async function openCompetition(name: string) {
+    async function openCompetition(id: string, name: string) {
         showView('view-competition-details');
         const titleEl = document.getElementById('comp-detail-title')!;
-        
+
         titleEl.textContent = name;
         
         // Update Info Box
@@ -1017,8 +1017,8 @@ async function init() {
         
         fileInput.onchange = async (e) => {
             const files = (e.target as HTMLInputElement).files;
-            if (files && files.length > 0) await handleFiles(files, name);
-            fileInput.value = ''; 
+            if (files && files.length > 0) await handleFiles(files, id);
+            fileInput.value = '';
         };
         
         dropArea.ondragover = (e) => { e.preventDefault(); dropArea.classList.add('dragover'); };
@@ -1027,7 +1027,7 @@ async function init() {
             e.preventDefault();
             dropArea.classList.remove('dragover');
             if (e.dataTransfer && e.dataTransfer.files.length > 0) {
-                handleFiles(e.dataTransfer.files, name);
+                handleFiles(e.dataTransfer.files, id);
             }
         };
 
@@ -1036,7 +1036,7 @@ async function init() {
         // No longer dynamically creating, as it is in the static template now
         if (optionsArea) optionsArea.innerHTML = ''; // Clear old on load
 
-        loadCompetitionDetails(name);
+        loadCompetitionDetails(id);
     }
 
     document.getElementById('btn-back-list')?.addEventListener('click', loadCompetitions);
@@ -1049,14 +1049,14 @@ async function init() {
     const modalCancel = document.getElementById('modal-cancel')!;
     const modalConfirm = document.getElementById('modal-confirm')!;
 
-    type DeleteAction = 
-        | { type: 'COMPETITION', name: string }
+    type DeleteAction =
+        | { type: 'COMPETITION', id: string, name: string }
         | { type: 'FILE', filename: string, competition: string };
 
     let pendingAction: DeleteAction | null = null;
 
-    function openDeleteCompetitionModal(compName: string) {
-        pendingAction = { type: 'COMPETITION', name: compName };
+    function openDeleteCompetitionModal(compId: string, compName: string) {
+        pendingAction = { type: 'COMPETITION', id: compId, name: compName };
         modalTitle.textContent = `Delete Competition?`;
         modalMessage.innerHTML = `Are you sure you want to delete <strong>${escapeHtml(compName)}</strong>?<br>This action cannot be undone and will permanently remove all associated files.`;
         
@@ -1133,7 +1133,7 @@ async function init() {
 
         try {
             if (pendingAction.type === 'COMPETITION') {
-                const resp = await fetch(`/api/delete_competition?name=${encodeURIComponent(pendingAction.name)}`);
+                const resp = await fetch(`/api/delete_competition?id=${encodeURIComponent(pendingAction.id)}`);
                 if (resp.ok) {
                      modalOverlay.classList.add('hidden');
                      loadCompetitions(); 
@@ -1146,7 +1146,7 @@ async function init() {
                 });
                 if (resp.ok) {
                     modalOverlay.classList.add('hidden');
-                    if (currentCompetitionData) loadCompetitionDetails(currentCompetitionData.name);
+                    if (currentCompetitionData) loadCompetitionDetails(currentCompetitionData.id);
                 } else {
                     alert('Failed to delete file.');
                 }

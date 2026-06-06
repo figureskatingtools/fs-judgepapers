@@ -169,6 +169,15 @@ function proxyToFunctionApp(req, res) {
 }
 
 // ── Static file serving with SPA fallback ──
+// Vite emits content-hashed filenames under /assets/, so those can be cached
+// forever; index.html must always be revalidated or browsers keep serving a
+// stale page that references old (deleted) bundles after a deploy.
+function cacheControlFor(urlPath) {
+    return urlPath.startsWith('/assets/')
+        ? 'public, max-age=31536000, immutable'
+        : 'no-cache';
+}
+
 function serveStatic(req, res) {
     const urlPath = decodeURIComponent(req.url.split('?')[0]);
     let filePath = path.join(PUBLIC_DIR, urlPath === '/' ? 'index.html' : urlPath);
@@ -184,7 +193,7 @@ function serveStatic(req, res) {
         if (!err && stats.isFile()) {
             const ext = path.extname(filePath);
             const mime = MIME_TYPES[ext] || 'application/octet-stream';
-            res.writeHead(200, { 'Content-Type': mime });
+            res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': cacheControlFor(urlPath) });
             fs.createReadStream(filePath).pipe(res);
         } else {
             // SPA fallback: serve index.html for any unmatched route
@@ -195,7 +204,7 @@ function serveStatic(req, res) {
                     res.end('Not Found');
                     return;
                 }
-                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
                 fs.createReadStream(indexPath).pipe(res);
             });
         }
