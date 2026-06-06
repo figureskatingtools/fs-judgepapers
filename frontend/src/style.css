@@ -354,6 +354,23 @@ button.primary:hover {
   cursor: not-allowed;
 }
 
+.btn-warning {
+  background-color: var(--gold-bright);
+  color: var(--ink);
+  border-color: var(--gold);
+}
+
+.btn-warning:hover {
+  background-color: var(--gold);
+  color: white;
+}
+
+.btn-warning:disabled {
+  background-color: var(--gold-tint);
+  color: var(--gold);
+  cursor: not-allowed;
+}
+
 /* ── Forms ── */
 input[type="checkbox"] {
   accent-color: var(--ink);

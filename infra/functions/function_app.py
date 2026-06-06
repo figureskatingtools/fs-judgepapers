@@ -13,7 +13,7 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 from azure.identity import DefaultAzureCredential
 from azure.core.exceptions import ResourceNotFoundError
 from azure.data.tables import TableClient, UpdateMode
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from processor import process_judging_papers
 from categories import load_categories, match_category, parse_filename_generic
@@ -23,6 +23,14 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 # Maximum file upload size: 25 MB
 MAX_UPLOAD_SIZE = 25 * 1024 * 1024
+
+# Automatic competition deletion: lifetime after creation, extension per
+# "extend" click, and the fixed migration date for rows created before this
+# feature existed (rows missing DeletionDate).
+DELETION_RETENTION_DAYS = 30
+DELETION_EXTENSION_DAYS = 7
+LEGACY_DELETION_DATE = "2026-06-12T00:00:00Z"
+AUTO_CLEANUP_ACTOR = "auto-cleanup"
 
 def is_user_allowed(email: str) -> bool:
     """
@@ -205,6 +213,46 @@ def get_competition_entity(comp_id: str):
     except Exception as e:
         logging.error(f"Error fetching competition entity {comp_id}: {e}")
         return None
+
+
+def _parse_iso_utc(value):
+    """
+    Parse a stored ISO timestamp (naive UTC with a trailing 'Z', as written by
+    `datetime.utcnow().isoformat() + "Z"`) into an aware UTC datetime.
+    Returns None on any failure — callers must treat None as "unknown", never
+    as "expired".
+    """
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        s = value[:-1] if value.endswith("Z") else value
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception as e:
+        logging.warning(f"Could not parse ISO timestamp '{value}': {e}")
+        return None
+
+
+def _ensure_deletion_date(comp_table, entity):
+    """
+    Lazy migration: rows created before the auto-deletion feature have no
+    DeletionDate — backfill the fixed migration date. Mutates the in-memory
+    entity and MERGE-writes the row (best-effort, mirrors migrate_legacy_row).
+    """
+    if entity.get("DeletionDate"):
+        return entity
+    entity["DeletionDate"] = LEGACY_DELETION_DATE
+    try:
+        comp_table.update_entity({
+            "PartitionKey": "GLOBAL",
+            "RowKey": entity["RowKey"],
+            "DeletionDate": LEGACY_DELETION_DATE,
+        }, mode=UpdateMode.MERGE)
+    except Exception as e:
+        logging.warning(f"Failed to backfill DeletionDate for {entity['RowKey']}: {e}")
+    return entity
 
 
 def _bump_competition_counters(comp_id, uploaded_delta=0, generate_delta=0, set_last_generated=False):
@@ -431,11 +479,15 @@ def list_competitions(req: func.HttpRequest) -> func.HttpResponse:
             if entity.get("Visible") is False:
                 continue
 
+            # Lazily backfill DeletionDate on pre-feature rows
+            _ensure_deletion_date(table_client, entity)
+
             competitions.append({
                 "id": entity["RowKey"],
                 "name": entity.get("Name", entity["RowKey"]),
                 "createdBy": entity.get("CreatedBy", "-"),
-                "createdDate": entity.get("CreatedDate", "-")
+                "createdDate": entity.get("CreatedDate", "-"),
+                "deletionDate": entity.get("DeletionDate", "-")
             })
 
         return func.HttpResponse(json.dumps(competitions), mimetype="application/json")
@@ -480,11 +532,12 @@ def create_competition(req: func.HttpRequest) -> func.HttpResponse:
         container = blob_service_client.get_container_client("fs-judgepapers")
 
         # Create metadata.json file to establish the "folder"
+        now = datetime.utcnow()
         metadata = {
             "id": new_id,
             "name": safe_name,
             "createdBy": email,
-            "createdDate": f"{datetime.utcnow().isoformat()}Z"
+            "createdDate": f"{now.isoformat()}Z"
         }
 
         container.upload_blob(f"{folder_path}/metadata.json", json.dumps(metadata, indent=4), overwrite=True)
@@ -498,6 +551,7 @@ def create_competition(req: func.HttpRequest) -> func.HttpResponse:
             "Visible": True,
             "CreatedBy": metadata["createdBy"],
             "CreatedDate": metadata["createdDate"],
+            "DeletionDate": f"{(now + timedelta(days=DELETION_RETENTION_DAYS)).isoformat()}Z",
             "UploadedFileCount": 0,
             "GenerateRunCount": 0
         }
@@ -509,14 +563,64 @@ def create_competition(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Internal server error", status_code=500)
 
 
+def _delete_competition_data(entity, deleted_by):
+    """
+    Shared deletion flow used by the HTTP endpoint and the auto-deletion timer:
+    delete the competition's blobs and generatedpapers rows, then soft-delete
+    the competitions row (Visible=False + deletion audit). Returns the number
+    of blobs deleted. Raises on hard failures (caller decides how to handle).
+    """
+    comp_id = entity["RowKey"]
+    folder_path = entity.get("FolderPath", comp_id)
+
+    blob_service_client = get_blob_service_client()
+    if not blob_service_client:
+        raise RuntimeError("Storage configuration invalid")
+
+    container = blob_service_client.get_container_client("fs-judgepapers")
+
+    # List all blobs with this prefix and delete them
+    blobs = container.list_blobs(name_starts_with=f"{folder_path}/")
+    count = 0
+    for blob in blobs:
+        container.delete_blob(blob.name)
+        count += 1
+
+    # Delete generated-papers table entities for this competition
+    try:
+        table_client = get_table_client()
+        if table_client:
+            safe_pk = comp_id.replace("'", "''")
+            entities = table_client.query_entities(f"PartitionKey eq '{safe_pk}'")
+            table_count = 0
+            for paper in entities:
+                table_client.delete_entity(partition_key=paper['PartitionKey'], row_key=paper['RowKey'])
+                table_count += 1
+            logging.info(f"Deleted {table_count} table rows for competition {comp_id}")
+    except Exception as table_err:
+        logging.warning(f"Error deleting table entities: {table_err}")
+
+    # Keep the competitions row as permanent history: hide it and record the deletion
+    comp_table = get_table_client("competitions")
+    comp_table.update_entity({
+        "PartitionKey": "GLOBAL",
+        "RowKey": comp_id,
+        "Visible": False,
+        "DeletedDate": f"{datetime.utcnow().isoformat()}Z",
+        "DeletedBy": deleted_by
+    }, mode=UpdateMode.MERGE)
+
+    return count
+
+
 @app.route(route="delete_competition", auth_level=func.AuthLevel.ANONYMOUS)
 def delete_competition(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Deleting competition...')
-    
+
     email = get_user_email_from_header(req)
     if not email:
         return func.HttpResponse("Unauthorized", status_code=401)
-        
+
     comp_id = req.params.get('id')
     if not comp_id:
         return func.HttpResponse("Missing id parameter", status_code=400)
@@ -526,48 +630,97 @@ def delete_competition(req: func.HttpRequest) -> func.HttpResponse:
         if not entity:
             return func.HttpResponse("Competition not found", status_code=404)
 
-        folder_path = entity.get("FolderPath", entity["RowKey"])
-
-        blob_service_client = get_blob_service_client()
-        if not blob_service_client: return func.HttpResponse("Config Error", status_code=500)
-
-        container = blob_service_client.get_container_client("fs-judgepapers")
-
-        # List all blobs with this prefix and delete them
-        blobs = container.list_blobs(name_starts_with=f"{folder_path}/")
-        count = 0
-        for blob in blobs:
-            container.delete_blob(blob.name)
-            count += 1
-
-        # Delete generated-papers table entities for this competition
-        try:
-            table_client = get_table_client()
-            if table_client:
-                safe_pk = comp_id.replace("'", "''")
-                entities = table_client.query_entities(f"PartitionKey eq '{safe_pk}'")
-                table_count = 0
-                for paper in entities:
-                    table_client.delete_entity(partition_key=paper['PartitionKey'], row_key=paper['RowKey'])
-                    table_count += 1
-                logging.info(f"Deleted {table_count} table rows for competition {comp_id}")
-        except Exception as table_err:
-            logging.warning(f"Error deleting table entities: {table_err}")
-
-        # Keep the competitions row as permanent history: hide it and record the deletion
-        comp_table = get_table_client("competitions")
-        comp_table.update_entity({
-            "PartitionKey": "GLOBAL",
-            "RowKey": comp_id,
-            "Visible": False,
-            "DeletedDate": f"{datetime.utcnow().isoformat()}Z",
-            "DeletedBy": email
-        }, mode=UpdateMode.MERGE)
+        count = _delete_competition_data(entity, email)
 
         return func.HttpResponse(json.dumps({"deleted": count}), mimetype="application/json")
     except Exception as e:
         logging.error(f"Error deleting competition: {e}")
         return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.route(route="extend_competition_deletion", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST", "GET"])
+def extend_competition_deletion(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('Extending competition deletion date...')
+
+    email = get_user_email_from_header(req)
+    if not email:
+        return func.HttpResponse("Unauthorized", status_code=401)
+
+    comp_id = req.params.get('id')
+    if not comp_id:
+        return func.HttpResponse("Missing id parameter", status_code=400)
+
+    try:
+        comp_table = get_table_client("competitions")
+        if not comp_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+
+        entity = get_competition_entity(comp_id)
+        if not entity or entity.get("Visible") is False:
+            return func.HttpResponse("Competition not found", status_code=404)
+
+        _ensure_deletion_date(comp_table, entity)
+
+        # Extend from the current deletion date, but never land in the past:
+        # if the date already passed (timer hasn't swept yet), extend from now.
+        now = datetime.now(timezone.utc)
+        current = _parse_iso_utc(entity.get("DeletionDate")) or now
+        new_deletion = max(current, now) + timedelta(days=DELETION_EXTENSION_DAYS)
+        new_str = f"{new_deletion.replace(tzinfo=None).isoformat()}Z"
+
+        comp_table.update_entity({
+            "PartitionKey": "GLOBAL",
+            "RowKey": comp_id,
+            "DeletionDate": new_str
+        }, mode=UpdateMode.MERGE)
+
+        logging.info(f"Extended deletion date for {comp_id} to {new_str} (by {email})")
+        return func.HttpResponse(json.dumps({"deletionDate": new_str}), mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Error extending deletion date for competition: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.timer_trigger(schedule="0 0 3 * * *", arg_name="timer", run_on_startup=False)
+def auto_delete_expired_competitions(timer: func.TimerRequest) -> None:
+    """
+    Daily sweep (03:00 UTC): delete competitions whose DeletionDate has passed,
+    using the same flow as manual deletion. Rows without a DeletionDate are
+    backfilled with the migration date instead of being treated as expired.
+    """
+    logging.info("Running auto-deletion sweep for expired competitions...")
+    try:
+        comp_table = get_table_client("competitions")
+        if not comp_table:
+            logging.error("Auto-deletion: storage configuration invalid")
+            return
+
+        now = datetime.now(timezone.utc)
+        deleted = 0
+        for entity in list(comp_table.query_entities("PartitionKey eq 'GLOBAL'")):
+            if entity.get("Visible") is False:
+                continue
+            # Legacy name-keyed rows are migrated lazily by list_competitions;
+            # skip them here rather than running the heavier migration.
+            if "FolderPath" not in entity:
+                continue
+
+            _ensure_deletion_date(comp_table, entity)
+            deletion = _parse_iso_utc(entity.get("DeletionDate"))
+            # Never delete on an unparseable date
+            if deletion is None or deletion > now:
+                continue
+
+            try:
+                _delete_competition_data(entity, AUTO_CLEANUP_ACTOR)
+                deleted += 1
+                logging.info(f"Auto-deleted expired competition {entity['RowKey']} ({entity.get('Name', '?')})")
+            except Exception as e:
+                logging.error(f"Auto-deletion failed for {entity['RowKey']}: {e}")
+
+        logging.info(f"Auto-deletion sweep complete. Deleted {deleted} competition(s).")
+    except Exception as e:
+        logging.error(f"Auto-deletion sweep error: {e}")
 
 
 def _get_categories():

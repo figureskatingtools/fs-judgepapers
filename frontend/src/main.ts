@@ -339,11 +339,26 @@ async function init() {
                      } catch(e) {}
                 }
 
+                let deletionStr = '-';
+                let daysLeft = Infinity;
+                if (comp.deletionDate && comp.deletionDate !== '-') {
+                     try {
+                         const d = new Date(comp.deletionDate);
+                         const dd = String(d.getDate()).padStart(2, '0');
+                         const mm = String(d.getMonth() + 1).padStart(2, '0');
+                         const yyyy = d.getFullYear();
+                         deletionStr = `${dd}.${mm}.${yyyy}`;
+                         daysLeft = Math.ceil((d.getTime() - Date.now()) / 86400000);
+                     } catch(e) {}
+                }
+                const showExtend = daysLeft < 5;
+
                 return `
                 <div class="comp-row">
                     <div class="comp-row-head">
                         <span class="comp-row-name">${escapeHtml(comp.name)}</span>
                         <div class="comp-row-actions">
+                            ${showExtend ? `<button class="btn btn-sm btn-warning extend-comp-btn" data-comp-id="${escapeHtml(comp.id)}">Extend +7d</button>` : ''}
                             <button class="btn btn-sm btn-ghost open-comp-btn" data-comp-id="${escapeHtml(comp.id)}" data-comp-name="${escapeHtml(comp.name)}">Open</button>
                             <button class="btn btn-sm btn-ghost btn-ghost--danger delete-comp-btn" data-comp-id="${escapeHtml(comp.id)}" data-comp-name="${escapeHtml(comp.name)}">Delete</button>
                         </div>
@@ -351,6 +366,7 @@ async function init() {
                     <div class="comp-row-meta">
                         <span>Creator: ${escapeHtml(comp.createdBy)}</span>
                         <span>Created: ${escapeHtml(dateStr)}</span>
+                        <span>Deletes: ${escapeHtml(deletionStr)}</span>
                     </div>
                 </div>
             `}).join('');
@@ -367,6 +383,21 @@ async function init() {
                 btn.addEventListener('click', (e) => {
                     const el = e.currentTarget as HTMLElement;
                     openDeleteCompetitionModal(el.dataset.compId!, el.dataset.compName!);
+                });
+            });
+
+            document.querySelectorAll('.extend-comp-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const el = e.currentTarget as HTMLButtonElement;
+                    el.disabled = true;
+                    try {
+                        const resp = await fetch(`/api/extend_competition_deletion?id=${encodeURIComponent(el.dataset.compId!)}`, { method: 'POST' });
+                        if (!resp.ok) throw new Error(`Error ${resp.status}`);
+                        loadCompetitions();
+                    } catch (_e) {
+                        el.disabled = false;
+                        alert('Failed to extend deletion date.');
+                    }
                 });
             });
 
