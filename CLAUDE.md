@@ -77,4 +77,12 @@ Human-readable segment names aren't in filenames; they're extracted from line 2 
 
 ## Branch / Deploy Strategy
 
-`test` → `main` promote via PRs. `.github/workflows/deploy.yml` deploys infra (Bicep), backend, and frontend to the matching GitHub environment: **push to `main` auto-deploys prod**; **`test` is manual-only** via `workflow_dispatch` (run the workflow from the branch whose code you want, pick the environment) — there is no `test`-branch push trigger. This mirrors the figureskatingtools-site repo. The workflow also patches the Entra app registration (redirect URIs, federated identity credential) and disables the Easy Auth token store.
+`test` → `main` promote via PRs, merged with **squash** (one commit per release on `main`). `.github/workflows/deploy.yml` deploys infra (Bicep), backend, and frontend to the matching GitHub environment: **push to `main` auto-deploys prod**; **`test` is manual-only** via `workflow_dispatch` (run the workflow from the branch whose code you want, pick the environment) — there is no `test`-branch push trigger. This mirrors the figureskatingtools-site repo. The workflow also patches the Entra app registration (redirect URIs, federated identity credential) and disables the Easy Auth token store.
+
+**After every squash-merge to `main`, reset `test` to `main`** — squash creates a new commit on `main`, so without this every future PR re-lists all old commits:
+
+```bash
+git checkout test && git fetch && git reset --hard origin/main && git push --force origin test
+```
+
+When asked to create a `test` → `main` PR: create it, then ask whether it has been merged (it's usually checked and squash-merged almost immediately) and run the reset above once it is. Verify before resetting that `git diff origin/main origin/test` is empty.
