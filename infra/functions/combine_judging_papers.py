@@ -145,3 +145,5 @@ def merge_pdfs(output_path, file_list):
     with open(output_path, "wb") as f:
         writer.write(f)
     print(f"Created: {output_path}")
+    # Page count of the merged PDF — used by the processor for usage statistics.
+    return len(writer.pages)

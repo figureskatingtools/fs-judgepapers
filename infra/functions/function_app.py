@@ -229,6 +229,60 @@ def _bump_competition_counters(comp_id, uploaded_delta=0, generate_delta=0, set_
         logging.warning(f"Failed to update counters for competition {comp_id}: {e}")
 
 
+def _store_competition_statistics(comp_id, stats):
+    """
+    Best-effort write of the usage-statistics snapshot (returned by the
+    processor) onto the competitions entity. Overwrites the previous snapshot;
+    only TotalPagesGenerated accumulates across generate runs.
+    Never raises — statistics failures must not fail the user's operation.
+    """
+    if not stats:
+        return
+    try:
+        comp_table = get_table_client("competitions")
+        if not comp_table:
+            return
+        entity = comp_table.get_entity(partition_key="GLOBAL", row_key=comp_id)
+
+        pages = int(stats.get("pages_generated", 0))
+        update = {
+            "PartitionKey": "GLOBAL",
+            "RowKey": comp_id,
+            "PagesGenerated": pages,
+            "TotalPagesGenerated": int(entity.get("TotalPagesGenerated", 0)) + pages,
+            "LastStatisticsDate": f"{datetime.utcnow().isoformat()}Z",
+        }
+
+        # snake_case stats key -> (PascalCase column, JSON-encode?)
+        column_map = {
+            "competition_type": ("CompetitionType", False),
+            "categories": ("CategoriesJson", True),
+            "category_count": ("CategoryCount", False),
+            "competitor_count": ("CompetitorCount", False),
+            "segment_count": ("SegmentCount", False),
+            "segment_types": ("SegmentTypesJson", True),
+            "judge_assignment_count": ("JudgeAssignmentCount", False),
+            "unique_judge_count": ("UniqueJudgeCount", False),
+            "unique_official_count": ("UniqueOfficialCount", False),
+            "officials_by_role": ("OfficialsByRoleJson", True),
+            "withdrawn_count": ("WithdrawnCount", False),
+            "day_count": ("CompetitionDayCount", False),
+            "first_date": ("FirstCompetitionDate", False),
+            "last_date": ("LastCompetitionDate", False),
+            "judging_method": ("JudgingMethod", False),
+            "language": ("PacketLanguage", False),
+        }
+        for key, (column, as_json) in column_map.items():
+            value = stats.get(key)
+            if value is None:
+                continue  # skip unknowns (e.g. CompetitorCount without a schedule)
+            update[column] = json.dumps(value, ensure_ascii=False) if as_json else value
+
+        comp_table.update_entity(update, mode=UpdateMode.MERGE)
+    except Exception as e:
+        logging.warning(f"Failed to store statistics for competition {comp_id}: {e}")
+
+
 def migrate_legacy_row(comp_table, entity):
     """
     Migrate a legacy competitions row (RowKey = competition name, name-based blob
@@ -1019,7 +1073,7 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
 
         # Run the processor
         logging.info("Running processor...")
-        process_judging_papers(source_dir, output_dir, options=options)
+        stats = process_judging_papers(source_dir, output_dir, options=options)
 
         # Upload results
         logging.info("Uploading results...")
@@ -1046,6 +1100,7 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"Uploaded {upload_count} files.")
 
         _bump_competition_counters(comp_id, generate_delta=1, set_last_generated=True)
+        _store_competition_statistics(comp_id, stats or {})
 
         return func.HttpResponse(f"Successfully processed {download_count} files and generated {upload_count} output files.", status_code=200)
 

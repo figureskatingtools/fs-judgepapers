@@ -318,6 +318,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
     print("\n[3/5] Combining Papers...")
     
     count = 0
+    total_pages = 0  # pages across per-person packets (for usage statistics)
     for date_str, persons in person_tasks.items():
         for slug, data in persons.items():
             tasks = data['tasks']
@@ -476,7 +477,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
             output_path = os.path.join(output_dir, output_filename)
             
             print(f"  Creating {output_filename}...")
-            merge_pdfs(output_path, file_list)
+            total_pages += merge_pdfs(output_path, file_list) or 0
             count += 1
 
     # ---------------------------------------------------------
@@ -531,3 +532,119 @@ def process_judging_papers(source_dir, output_dir, options=None):
                     print(f"  Error deleting {filepath}: {e}")
 
     print(f"\nDone! Created judging paper files and daily summaries in '{output_dir}'.")
+
+    # ---------------------------------------------------------
+    # 6. Compute usage statistics (best-effort, never raises)
+    # ---------------------------------------------------------
+    try:
+        stats = _compute_statistics(
+            categories, schedule_entries, person_tasks, prefix_withdrawn,
+            language, total_pages
+        )
+    except Exception as e:
+        print(f"  Warning: Failed to compute statistics: {e}")
+        stats = {}
+
+    return stats
+
+
+def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withdrawn,
+                        language, total_pages):
+    """
+    Build a usage-statistics dict from the structures accumulated during
+    process_judging_papers. Stored on the competitions table row (which
+    survives soft-deletion) for a future statistics page.
+    """
+    # Distinct prefixes (segments) actually processed, from post-conflict-filter tasks
+    prefixes = set()
+    role_slugs = {}        # role bucket -> set of person slugs
+    judge_slugs = set()    # slugs holding role 'judge'
+    all_slugs = set()      # slugs across all roles
+    judge_assignment_count = 0
+    role_buckets = {
+        'referee': 'referees',
+        'technical_controller': 'technical_controllers',
+        'technical_specialist_1': 'technical_specialists',
+        'technical_specialist_2': 'technical_specialists',
+        'data_operator': 'data_operators',
+        'replay_operator': 'replay_operators',
+    }
+
+    for date_str, persons in person_tasks.items():
+        for slug, data in persons.items():
+            all_slugs.add(slug)
+            for prefix, role in data['tasks']:
+                prefixes.add(prefix)
+                if role == 'judge':
+                    judge_slugs.add(slug)
+                    judge_assignment_count += 1
+                elif role in role_buckets:
+                    role_slugs.setdefault(role_buckets[role], set()).add(slug)
+
+    officials_by_role = {bucket: len(slugs) for bucket, slugs in sorted(role_slugs.items())}
+
+    # Categories / segment types / competition type / judging method per prefix
+    category_names = set()
+    competition_types = set()
+    judging_methods = set()
+    segment_types = set()
+    for prefix in prefixes:
+        matched = match_category(prefix, categories)
+        if matched:
+            if language == "en":
+                category_names.add(matched["displayName"])
+            else:
+                category_names.add(matched.get("displayNameFi", matched["displayName"]))
+            competition_types.add(matched["competitionType"])
+            judging_methods.add(matched["judgingMethod"])
+        _, segment = parse_prefix(prefix, categories, language=language)
+        if segment and segment != "Category General":
+            segment_types.add(segment)
+
+    def _single_or_mixed(values):
+        values = {v for v in values if v}
+        if not values:
+            return None
+        return values.pop() if len(values) == 1 else "Mixed"
+
+    # Competitor count: per category, the largest segment entry count from the
+    # schedule (same field skates SP and FS), summed across categories.
+    competitor_count = None
+    if schedule_entries:
+        per_category_max = {}
+        for entry in schedule_entries:
+            key = entry.get("category_name") or entry.get("event_name", "")
+            per_category_max[key] = max(per_category_max.get(key, 0), entry.get("entries", 0))
+        competitor_count = sum(per_category_max.values())
+
+    # Competition days: prefer panel-derived dates, fall back to schedule dates
+    dates = sorted(person_tasks.keys())
+    if not dates and schedule_entries:
+        dates = sorted({e["date"] for e in schedule_entries if e.get("date")})
+
+    def _iso_date(yyyymmdd):
+        return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}" if len(yyyymmdd) == 8 else yyyymmdd
+
+    # Withdrawn entries are counted per segment: a skater withdrawing from both
+    # SP and FS counts twice (this measures withdrawn entries, not persons).
+    withdrawn_count = sum(len(v) for v in prefix_withdrawn.values())
+
+    return {
+        "competition_type": _single_or_mixed(competition_types),
+        "categories": sorted(category_names),
+        "category_count": len(category_names),
+        "competitor_count": competitor_count,
+        "segment_count": len(prefixes),
+        "segment_types": sorted(segment_types),
+        "judge_assignment_count": judge_assignment_count,
+        "unique_judge_count": len(judge_slugs),
+        "unique_official_count": len(all_slugs),
+        "officials_by_role": officials_by_role,
+        "withdrawn_count": withdrawn_count,
+        "day_count": len(dates),
+        "first_date": _iso_date(dates[0]) if dates else None,
+        "last_date": _iso_date(dates[-1]) if dates else None,
+        "judging_method": _single_or_mixed(judging_methods),
+        "language": language,
+        "pages_generated": total_pages,
+    }
