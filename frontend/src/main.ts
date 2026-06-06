@@ -77,7 +77,7 @@ appElement.innerHTML = `
   <main>
     <div id="loading-view" class="loading-screen">
       <h2>Authenticating...</h2>
-      <p style="color: var(--text-secondary);">Please wait while we verify your credentials.</p>
+      <p>Please wait while we verify your credentials.</p>
     </div>
 
     <div id="error-view" class="error-screen hidden">
@@ -85,17 +85,18 @@ appElement.innerHTML = `
     </div>
 
     <div id="landing-view" class="hidden">
-      <div class="card" style="text-align: center; max-width: 800px; margin: 4rem auto;">
-        <h2 style="font-size: 2rem; margin-bottom: 1.5rem;">Create Judging Papers with Ease</h2>
-        <p style="margin-bottom: 1.5rem; color: var(--text-secondary); font-size: 1.1rem; line-height: 1.6;">
+      <div class="card landing-card reveal">
+        <span class="micro-label">Judge Paper Creator</span>
+        <h2>Create Judging Papers with Ease</h2>
+        <p class="lead">
           This application provides an easy way to create judging papers for figure skating competitions.
           Simply upload the PDF exports from <strong>Figure Skating Manager</strong>, and we handle the rest.
         </p>
-        <div style="margin: 2rem 0; padding: 1.5rem; background-color: #f8fafc; border-radius: 0.5rem; border: 1px solid var(--border-color);">
-            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+        <div class="landing-contact">
+            <p>
                 To access the application, please contact the administrator:
             </p>
-             <a href="mailto:markus@lintuala.fi" style="color: var(--primary-color); font-weight: 600;">markus@lintuala.fi</a>
+             <a href="mailto:markus@lintuala.fi">markus@lintuala.fi</a>
         </div>
         <div style="margin-top: 2rem;">
             <a href="/.auth/login/aad?post_login_redirect_url=/" class="btn btn-primary">Sign In to Continue</a>
@@ -107,14 +108,14 @@ appElement.innerHTML = `
       <!-- Modal Container -->
       <div id="modal-overlay" class="modal-overlay hidden">
         <div class="modal">
-            <h3 id="modal-title" style="margin-top: 0; font-size: 1.25rem;">Confirm Action</h3>
-            <p id="modal-message" style="color: var(--text-secondary); margin-bottom: 1.5rem;">Are you sure?</p>
-            
+            <h3 id="modal-title">Confirm Action</h3>
+            <p id="modal-message" class="modal-message">Are you sure?</p>
+
             <div id="modal-extra-content" style="margin-bottom: 1.5rem;">
                 <!-- Dynamic Content like Checkbox -->
             </div>
 
-            <div style="display: flex; justify-content: flex-end; gap: 0.75rem;">
+            <div class="modal-actions">
                 <button id="modal-cancel" class="btn btn-ghost btn-sm">Cancel</button>
                 <button id="modal-confirm" class="btn btn-primary btn-sm">Confirm</button>
             </div>
@@ -122,99 +123,101 @@ appElement.innerHTML = `
       </div>
 
       <div id="view-competitions" class="hidden">
-        <div class="card">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <div class="card reveal">
+            <div class="view-header">
                 <h2>Competitions</h2>
                 <button id="btn-create-comp" class="btn btn-primary btn-sm">Create New</button>
             </div>
             <div id="competitions-list">
-                <p style="color: var(--text-secondary);">Loading competitions...</p>
+                <p class="text-muted">Loading competitions...</p>
             </div>
         </div>
       </div>
 
       <div id="view-competition-details" class="hidden">
-        <div class="card">
-             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
-                <div style="display: flex; align-items: center; gap: 1rem;">
+        <div class="card reveal">
+             <div class="view-header">
+                <div class="view-header-lead">
                     <button id="btn-back-list" class="btn btn-sm btn-ghost">← Back</button>
-                    <h2 id="comp-detail-title" style="margin: 0;">Competition Name</h2>
+                    <h2 id="comp-detail-title">Competition Name</h2>
                 </div>
             </div>
 
-            <div style="display: flex; gap: 1.5rem; margin-bottom: 2rem; align-items: stretch;">
+            <div class="detail-grid">
                 <!-- Info Box -->
-                <div style="width: 250px; background: #f8fafc; padding: 1.5rem; border-radius: 0.5rem; border: 1px solid var(--border-color); flex-shrink: 0;">
-                    <h3 style="margin-top: 0; font-size: 0.875rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1.25rem; font-weight: 600;">Competition Details</h3>
-                    
-                    <div style="margin-bottom: 1.25rem;">
-                        <label style="display: block; font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.25rem;">Name</label>
-                        <div id="info-comp-name" style="font-weight: 600; font-size: 1rem; word-break: break-word; line-height: 1.3;">-</div>
+                <div class="info-panel">
+                    <h3 class="micro-label info-panel-title">Competition Details</h3>
+
+                    <div class="info-field">
+                        <span class="info-field-label">Name</span>
+                        <div id="info-comp-name" class="info-field-value info-field-value--name">-</div>
                     </div>
-                    
-                    <div style="margin-bottom: 1.25rem;">
-                        <label style="display: block; font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.25rem;">Type</label>
-                        <div id="info-comp-type" style="font-weight: 500; font-size: 0.95rem;">-</div>
+
+                    <div class="info-field">
+                        <span class="info-field-label">Type</span>
+                        <div id="info-comp-type" class="info-field-value">-</div>
                     </div>
-                    
-                    <div>
-                        <label style="display: block; font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.25rem;">Dates</label>
-                        <div id="info-comp-dates" style="font-weight: 500; font-size: 0.95rem;">-</div>
+
+                    <div class="info-field">
+                        <span class="info-field-label">Dates</span>
+                        <div id="info-comp-dates" class="info-field-value">-</div>
                     </div>
                 </div>
 
                 <!-- Upload Area -->
                 <div id="comp-upload-area" class="upload-area" style="flex: 1; margin: 0; display: flex; flex-direction: column; justify-content: center; align-items: center;">
-                    <p style="margin: 0 0 0.5rem 0; font-size: 1.1rem; font-weight: 500;">Drag & Drop PDF files here</p>
-                    <p style="margin: 0 0 1rem 0; color: var(--text-secondary);">or</p>
+                    <p class="upload-title">Drag & Drop PDF files here</p>
+                    <p class="upload-or">or</p>
                     <button id="browse-files-btn" class="btn btn-sm btn-primary">Browse Files</button>
                     <input type="file" id="file-input" multiple accept=".pdf" style="display: none;">
-                    <div id="upload-status" style="margin-top: 1rem; font-size: 0.875rem; min-height: 1.25rem;"></div>
+                    <div id="upload-status" class="upload-status"></div>
                 </div>
             </div>
-            
+
             <div id="comp-files-container">
-                <p style="color: var(--text-secondary);">Loading files...</p>
+                <p class="text-muted">Loading files...</p>
             </div>
-            
-            <div id="action-container" style="margin-top: 2rem; border-top: 1px solid var(--border-color); padding-top: 1.5rem; display: flex; gap: 2rem; align-items: flex-start;">
-                 <div id="generated-files-list" style="flex: 1; display: flex; flex-direction: column; gap: 0.5rem;">
+
+            <div id="action-container" class="action-container">
+                 <div id="generated-files-list" class="generated-files-list">
                       <!-- Generated files injected here -->
                  </div>
-                 
-                 <div id="right-panel" style="width: 400px; flex-shrink: 0; display: flex; flex-direction: column; gap: 1rem;">
-                      <div id="options-area" style="background: #f8fafc; border: 1px solid var(--border-color); border-radius: 0.5rem; padding: 1rem;">
+
+                 <div id="right-panel" class="right-panel">
+                      <div id="options-area" class="options-area">
                           <!-- Options injected here -->
                       </div>
-                      <button id="btn-generate" class="btn btn-primary" style="width: 100%; display: flex; align-items: center; justify-content: center; height: 3rem;" disabled>
+                      <button id="btn-generate" class="btn btn-primary btn-generate" disabled>
                          Generate Papers
                       </button>
                  </div>
             </div>
         </div>
       </div>
-      
+
       <div id="view-create-competition" class="hidden">
-        <div class="card" style="max-width: 600px; margin: 0 auto;">
+        <div class="card reveal" style="max-width: 600px; margin: 0 auto;">
+             <span class="micro-label">New Competition</span>
              <h2>Create New Competition</h2>
-             <p style="color: var(--text-secondary); margin-bottom: 1.5rem;">Enter a name for the new competition folder.</p>
-             <div style="margin-bottom: 1rem;">
-                <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Competition Name</label>
-                <input type="text" id="comp-name-input" style="width: 100%; padding: 0.75rem; border: 1px solid var(--border-color); border-radius: 0.5rem; box-sizing: border-box;" placeholder="e.g. Winter-Cup-2026">
+             <p class="text-muted" style="margin-bottom: 1.5rem;">Enter a name for the new competition folder.</p>
+             <div style="margin-bottom: 1.5rem;">
+                <label class="form-label">Competition Name</label>
+                <input type="text" id="comp-name-input" class="form-input" placeholder="e.g. Winter-Cup-2026">
              </div>
-             <div style="display: flex; justify-content: flex-end; gap: 1rem;">
+             <div class="form-actions">
                 <button id="btn-cancel-create" class="btn btn-ghost">Cancel</button>
                 <button id="btn-confirm-create" class="btn btn-primary">Create</button>
              </div>
         </div>
       </div>
-      
-      <div id="view-welcome" class="card" style="max-width: 800px; margin: 0 auto;">
+
+      <div id="view-welcome" class="card reveal" style="max-width: 800px; margin: 0 auto;">
+        <span class="micro-label">Judge Paper Creator</span>
         <h2 style="margin-bottom: 1.5rem;">Welcome to Judge Paper Creator</h2>
-        
+
         <div style="margin-bottom: 2rem;">
-            <h3 style="font-size: 1.1rem; color: #0c4a6e; margin-bottom: 0.75rem;">How to use:</h3>
-            <ol style="color: var(--text-secondary); line-height: 1.6; padding-left: 1.5rem; margin-bottom: 1.5rem;">
+            <h3 style="font-size: 1.15rem; margin-bottom: 0.75rem;">How to use:</h3>
+            <ol class="howto-list">
                 <li>Click <strong>New Competition</strong> to create a workspace for your event.</li>
                 <li>Open the competition and <strong>upload the PDF files</strong> exported from <em>Figure Skating Manager</em>.</li>
                 <li>The system will automatically validate the files and ensure all required documents are present.</li>
@@ -223,11 +226,11 @@ appElement.innerHTML = `
             </ol>
             <button id="action-btn" class="btn btn-primary">Go to Competitions</button>
         </div>
-        
-        <div style="padding-top: 1.5rem; border-top: 1px solid var(--border-color);">
-            <p style="color: var(--text-secondary); font-size: 0.9rem;">
+
+        <div class="card-footnote">
+            <p>
                 <strong>Feedback & Support:</strong><br>
-                Please report any bugs or send feature requests to: <a href="mailto:markus@lintuala.fi" style="color: var(--primary-color);">markus@lintuala.fi</a>
+                Please report any bugs or send feature requests to: <a href="mailto:markus@lintuala.fi">markus@lintuala.fi</a>
             </p>
         </div>
       </div>
@@ -310,17 +313,17 @@ async function init() {
     const loadCompetitions = async () => {
         showView('view-competitions');
         const listContainer = document.getElementById('competitions-list')!;
-        listContainer.innerHTML = '<p style="color: var(--text-secondary);">Loading competitions...</p>';
-        
+        listContainer.innerHTML = '<p class="text-muted">Loading competitions...</p>';
+
         try {
             const resp = await fetch('/api/list_competitions');
             if (!resp.ok) {
                 throw new Error(`Error ${resp.status}: ${resp.statusText}`);
             }
             const competitions: any[] = await resp.json();
-            
+
             if (competitions.length === 0) {
-                 listContainer.innerHTML = '<p style="color: var(--text-secondary);">No competitions found. Create one to get started.</p>';
+                 listContainer.innerHTML = '<p class="text-muted">No competitions found. Create one to get started.</p>';
                  return;
             }
             
@@ -337,15 +340,15 @@ async function init() {
                 }
 
                 return `
-                <div style="background: var(--bg-color); padding: 1rem; margin-bottom: 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border-color);">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                        <span style="font-weight: 600; font-size: 1.1rem;">${escapeHtml(comp.name)}</span>
-                        <div style="display: flex; gap: 0.5rem;">
+                <div class="comp-row">
+                    <div class="comp-row-head">
+                        <span class="comp-row-name">${escapeHtml(comp.name)}</span>
+                        <div class="comp-row-actions">
                             <button class="btn btn-sm btn-ghost open-comp-btn" data-comp="${escapeHtml(comp.name)}">Open</button>
-                            <button class="btn btn-sm btn-ghost delete-comp-btn" style="color: #ef4444;" data-comp="${escapeHtml(comp.name)}">Delete</button>
+                            <button class="btn btn-sm btn-ghost btn-ghost--danger delete-comp-btn" data-comp="${escapeHtml(comp.name)}">Delete</button>
                         </div>
                     </div>
-                    <div style="font-size: 0.85rem; color: var(--text-secondary); display: flex; gap: 1.5rem;">
+                    <div class="comp-row-meta">
                         <span>Creator: ${escapeHtml(comp.createdBy)}</span>
                         <span>Created: ${escapeHtml(dateStr)}</span>
                     </div>
@@ -368,7 +371,7 @@ async function init() {
             });
 
         } catch (_e) {
-            listContainer.innerHTML = `<p style="color: #ef4444;">Failed to load competitions.</p>`;
+            listContainer.innerHTML = `<p class="text-error">Failed to load competitions.</p>`;
         }
     };
 
@@ -387,9 +390,9 @@ async function init() {
 
         if (Object.keys(structure).length === 0 && competitionFiles.length === 0) {
             container.innerHTML = `
-                <div style="text-align: center; padding: 3rem; border: 2px dashed var(--border-color); border-radius: 1rem; color: var(--text-secondary);">
+                <div class="empty-state">
                     <p>No processed files found.</p>
-                    <p style="font-size: 0.875rem;">Upload PDFs to get started.</p>
+                    <p class="empty-hint">Upload PDFs to get started.</p>
                 </div>
             `;
             isGlobalValid = false;
@@ -410,9 +413,9 @@ async function init() {
         if (!compValidation.isValid) {
             isGlobalValid = false;
             html += `
-                <div style="margin-bottom: 1rem; padding: 0.75rem; background: #fef2f2; border: 1px solid #fee2e2; border-radius: 0.5rem;">
-                    <h5 style="margin: 0 0 0.5rem 0; color: var(--error-color); font-size: 0.875rem;">Missing Competition Files:</h5>
-                    <ul style="margin: 0; padding-left: 1.5rem; color: #b91c1c; font-size: 0.875rem;">
+                <div class="alert-missing">
+                    <h5>Missing Competition Files:</h5>
+                    <ul>
                         ${compValidation.missingFiles.map(f => `<li>${f}</li>`).join('')}
                     </ul>
                 </div>
@@ -422,19 +425,19 @@ async function init() {
         // Show competition-wide files (e.g. CompetitionSchedule) in their own section
         if (competitionFiles.length > 0) {
             html += `
-                <div style="margin-bottom: 0.5rem; border: 1px solid var(--border-color); border-radius: 0.5rem; overflow: hidden; background: white;">
-                    <div style="background: #f1f5f9; padding: 0.5rem 1rem; display: flex; justify-content: space-between; align-items: center; border-left: 4px solid var(--success-color); min-height: 2.5rem;">
-                        <div style="display: flex; align-items: center; gap: 0.75rem;">
-                            <span style="color: var(--text-secondary); font-weight: bold;">📋</span>
-                            <span style="font-weight: 600;">Competition Files</span>
+                <div class="category-card">
+                    <div class="category-header category-header--static is-valid">
+                        <div class="category-head-lead">
+                            <span class="status-mark">✓</span>
+                            <span class="category-title">Competition Files</span>
                         </div>
                     </div>
-                    <div style="padding: 1rem;">
-                        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div class="category-content">
+                        <div class="file-list">
                             ${competitionFiles.map((file: any) => `
-                                <div style="padding: 0.5rem; background: var(--bg-color); border-radius: 0.25rem; font-size: 0.875rem; display: flex; align-items: center; justify-content: space-between;">
+                                <div class="file-row">
                                     <span title="${escapeHtml(file.suffix)}">${escapeHtml(file.filename)}</span>
-                                    <button class="btn-icon-danger delete-file-btn" data-filename="${escapeHtml(file.filename)}" style="background:none; border:none; color: #ef4444; cursor: pointer; font-size: 1.2rem; line-height: 1;" title="Delete File">×</button>
+                                    <button class="file-delete-btn delete-file-btn" data-filename="${escapeHtml(file.filename)}" title="Delete File">×</button>
                                 </div>
                             `).join('')}
                         </div>
@@ -452,9 +455,9 @@ async function init() {
                 isGlobalValid = false;
             }
             
-            const statusColor = validation.isValid ? 'var(--success-color)' : 'var(--error-color)';
-            const statusIcon = validation.isValid ? '✓' : '⚠️';
-            const isCollapsed = validation.isValid; 
+            const validityClass = validation.isValid ? 'is-valid' : 'is-invalid';
+            const statusIcon = validation.isValid ? '✓' : '⚠︎';
+            const isCollapsed = validation.isValid;
 
             // Check for competition name conflict
             let catCompNameHtml = '';
@@ -471,7 +474,7 @@ async function init() {
                      if (detectedName) break;
                  }
                  if (detectedName) {
-                    catCompNameHtml = `<span style="color: #ef4444; font-size: 0.8rem; margin-left: 1rem; font-weight: 600;">Competition name: ${escapeHtml(detectedName)}</span>`;
+                    catCompNameHtml = `<span class="category-conflict">Competition name: ${escapeHtml(detectedName)}</span>`;
                  }
             }
             
@@ -504,29 +507,29 @@ async function init() {
             }
 
             html += `
-                <div style="margin-bottom: 0.5rem; border: 1px solid var(--border-color); border-radius: 0.5rem; overflow: hidden; background: white;">
+                <div class="category-card">
                     <!-- Header -->
-                    <div class="category-header" data-category="${category}" style="background: #f1f5f9; padding: 0.5rem 1rem; cursor: pointer; display: flex; justify-content: space-between; align-items: center; border-left: 4px solid ${statusColor}; min-height: 2.5rem;">
-                        <div style="display: flex; align-items: center; gap: 0.75rem; flex: 1; overflow: hidden;">
-                             <span style="color: ${statusColor}; font-weight: bold; flex-shrink: 0;">${statusIcon}</span>
-                             <span style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(displayCategory)}</span>
+                    <div class="category-header ${validityClass}" data-category="${category}">
+                        <div class="category-head-lead">
+                             <span class="status-mark">${statusIcon}</span>
+                             <span class="category-title">${escapeHtml(displayCategory)}</span>
                              ${isMupi ? '<span class="tag-mupi">MUPI</span>' : ''}
                              ${catCompNameHtml}
                         </div>
-                        <div style="display: flex; align-items: center; gap: 1rem; flex-shrink: 0;">
-                            ${ validation.missingFiles.length > 0 ? `<span style="font-size: 0.75rem; color: var(--error-color); font-weight: 500;">${validation.missingFiles.length} missing</span>` : '' }
-                            <span class="toggle-icon" style="font-size: 0.75rem; color: var(--text-secondary); transition: transform 0.2s;">${isCollapsed ? '▼' : '▲'}</span>
+                        <div class="category-head-tail">
+                            ${ validation.missingFiles.length > 0 ? `<span class="missing-count">${validation.missingFiles.length} missing</span>` : '' }
+                            <span class="toggle-icon">${isCollapsed ? '▾' : '▴'}</span>
                         </div>
                     </div>
-                    
+
                     <!-- Content -->
-                    <div class="category-content" id="content-${category.replace(/\s+/g, '-')}" style="padding: 1rem; display: ${isCollapsed ? 'none' : 'block'};">
-                        
+                    <div class="category-content" id="content-${category.replace(/\s+/g, '-')}" style="display: ${isCollapsed ? 'none' : 'block'};">
+
                         <!-- Missing Files Warning -->
                         ${!validation.isValid ? `
-                            <div style="margin-bottom: 1rem; padding: 0.75rem; background: #fef2f2; border: 1px solid #fee2e2; border-radius: 0.5rem;">
-                                <h5 style="margin: 0 0 0.5rem 0; color: var(--error-color); font-size: 0.875rem;">Missing Files:</h5>
-                                <ul style="margin: 0; padding-left: 1.5rem; color: #b91c1c; font-size: 0.875rem;">
+                            <div class="alert-missing">
+                                <h5>Missing Files:</h5>
+                                <ul>
                                     ${validation.missingFiles.map(f => `<li>${f}</li>`).join('')}
                                 </ul>
                             </div>
@@ -537,20 +540,20 @@ async function init() {
 
             for (const [segment, files] of Object.entries(segments as any)) {
                 html += `
-                    <div style="margin-bottom: 1rem;">
-                        <h4 style="margin: 0 0 0.5rem 0; font-size: 0.875rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">${segment}</h4>
-                        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div class="segment-block">
+                        <h4 class="segment-title">${segment}</h4>
+                        <div class="file-list">
                 `;
-                
+
                 (files as any[]).forEach((file: any) => {
                     html += `
-                        <div style="padding: 0.5rem; background: var(--bg-color); border-radius: 0.25rem; font-size: 0.875rem; display: flex; align-items: center; justify-content: space-between;">
+                        <div class="file-row">
                             <span title="${escapeHtml(file.suffix)}">${escapeHtml(file.filename)}</span>
-                            <button class="btn-icon-danger delete-file-btn" data-filename="${escapeHtml(file.filename)}" style="background:none; border:none; color: #ef4444; cursor: pointer; font-size: 1.2rem; line-height: 1;" title="Delete File">×</button>
+                            <button class="file-delete-btn delete-file-btn" data-filename="${escapeHtml(file.filename)}" title="Delete File">×</button>
                         </div>
                     `;
                 });
-                
+
                 html += `</div></div>`;
             }
             
@@ -579,7 +582,7 @@ async function init() {
                          
                          // Update arrow
                          const arrow = (e.currentTarget as HTMLElement).querySelector('.toggle-icon');
-                         if(arrow) arrow.textContent = isHidden ? '▲' : '▼';
+                         if(arrow) arrow.textContent = isHidden ? '▴' : '▾';
                      }
                 }
             });
@@ -674,7 +677,7 @@ async function init() {
 
     async function loadCompetitionDetails(name: string) {
         const container = document.getElementById('comp-files-container')!;
-        container.innerHTML = '<p style="color: var(--text-secondary);">Scanning files...</p>';
+        container.innerHTML = '<p class="text-muted">Scanning files...</p>';
 
         try {
             const resp = await fetch(`/api/get_competition_details?name=${encodeURIComponent(name)}`);
@@ -701,13 +704,11 @@ async function init() {
             if (data.alerts && data.alerts.length > 0) {
                  const alertMsg = data.alerts.join('<br>');
                  openErrorModal('Configuration Error', alertMsg);
-                 
+
                  nameEl.textContent = 'Error! Multiple file names found! FIX THESE!';
-                 nameEl.style.color = '#ef4444'; // Red color
-                 nameEl.style.fontWeight = '800';
+                 nameEl.classList.add('info-field-value--alert');
             } else {
-                 nameEl.style.color = ''; // Reset color
-                 nameEl.style.fontWeight = '600';
+                 nameEl.classList.remove('info-field-value--alert');
             }
             
             // Set language from competition settings
@@ -758,26 +759,26 @@ async function init() {
                          const safeJudgePapersPath = escapeHtml('judgePapers/' + f.fileName);
 
                          return `
-                            <div style="margin-bottom: 0.5rem; display: flex; align-items: stretch; gap: 0.5rem;">
-                                <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="flex: 1; display: block; padding: 0.75rem; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 0.5rem; text-decoration: none; color: inherit; transition: background 0.2s;">
-                                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                                        <span style="font-weight: 600; color: #0369a1; font-size: 0.9rem;">
+                            <div class="gen-file">
+                                <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="gen-file-link">
+                                    <div class="gen-file-head">
+                                        <span class="gen-file-desc">
                                             ${safeDescription}
-                                            ${dateDisplay ? `<span style="color: #0c4a6e; font-size: 1rem; font-weight: 700; margin-left: 0.5rem;">${escapeHtml(dateDisplay)}</span>` : ''}
+                                            ${dateDisplay ? `<span class="gen-file-date">${escapeHtml(dateDisplay)}</span>` : ''}
                                         </span>
-                                        <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                            ${sizeStr ? `<span style="font-size: 0.75rem; color: #64748b; background: white; padding: 0.1rem 0.4rem; border-radius: 4px; border: 1px solid #e2e8f0;">${escapeHtml(sizeStr)}</span>` : ''}
-                                            <span style="font-size: 0.75rem; color: #64748b; background: white; padding: 0.1rem 0.4rem; border-radius: 99px; border: 1px solid #e2e8f0;">Exp: ${escapeHtml(expStr)}</span>
+                                        <div class="gen-file-badges">
+                                            ${sizeStr ? `<span class="gen-badge">${escapeHtml(sizeStr)}</span>` : ''}
+                                            <span class="gen-badge">Exp: ${escapeHtml(expStr)}</span>
                                         </div>
                                     </div>
-                                    <div style="font-size: 0.8rem; color: #334155; margin-top: 0.25rem; display: flex; align-items: center;">
+                                    <div class="gen-file-name">
                                         ${safeFileName}
                                     </div>
                                 </a>
-                                <button class="btn-icon-copy copy-link-btn" data-url="${safeUrl}" style="background: white; border: 1px solid #bae6fd; border-radius: 0.5rem; color: #0369a1; width: 3rem; font-size: 1.2rem; cursor: pointer; display: flex; justify-content: center; align-items: center;" title="Copy Link to Clipboard">
+                                <button class="icon-btn icon-btn--copy copy-link-btn" data-url="${safeUrl}" title="Copy Link to Clipboard">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                                 </button>
-                                <button class="btn-icon-danger delete-gen-file-btn" data-filename="${safeJudgePapersPath}" style="background: white; border: 1px solid #fee2e2; border-radius: 0.5rem; color: #ef4444; width: 3rem; font-size: 1.5rem; cursor: pointer; display: flex; justify-content: center; align-items: center;" title="Delete File">
+                                <button class="icon-btn icon-btn--danger delete-gen-file-btn" data-filename="${safeJudgePapersPath}" title="Delete File">
                                     ×
                                 </button>
                             </div>
@@ -793,12 +794,10 @@ async function init() {
                              navigator.clipboard.writeText(url).then(() => {
                                  const originalHTML = el.innerHTML;
                                  el.innerHTML = '✓';
-                                 el.style.color = 'var(--success-color)';
-                                 el.style.borderColor = 'var(--success-color)';
+                                 el.classList.add('is-copied');
                                  setTimeout(() => {
                                      el.innerHTML = originalHTML;
-                                     el.style.color = '#0369a1';
-                                     el.style.borderColor = '#bae6fd';
+                                     el.classList.remove('is-copied');
                                  }, 2000);
                              }).catch(() => {});
                          });
@@ -817,7 +816,7 @@ async function init() {
             }
 
         } catch (_e) {
-            container.innerHTML = '<p style="color: #ef4444;">Error loading files.</p>';
+            container.innerHTML = '<p class="text-error">Error loading files.</p>';
         }
     }
 
@@ -857,36 +856,34 @@ async function init() {
         }
 
         if (segments.length === 0) {
-             optionsArea.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.9rem;">No segments detected yet.</p>';
+             optionsArea.innerHTML = '<p class="text-muted" style="font-size: 0.9rem; margin: 0;">No segments detected yet.</p>';
              return;
         }
 
         optionsArea.innerHTML = `
-            <div style="margin-bottom: 0.75rem;">
-                <h3 style="margin: 0; font-size: 0.85rem; color: var(--text-secondary); text-transform: uppercase; font-weight: 600;">Global Settings</h3>
-            </div>
+            <h3 class="options-title">Global Settings</h3>
 
-            <div style="margin-bottom: 0.75rem;">
-                <label style="display: flex; align-items: center; cursor: pointer; gap: 0.5rem;">
-                    <input type="checkbox" id="use-english-names" ${currentLanguage === 'en' ? 'checked' : ''} style="margin: 0;">
-                    <span style="font-size: 0.85rem; color: var(--text-primary); line-height: 1.3;">Use English category names</span>
-                </label>
-            </div>
-            
-            <div style="margin-bottom: 0.75rem;">
-                <label style="display: flex; align-items: center; cursor: pointer; gap: 0.5rem;">
-                    <input type="checkbox" id="global-use-time-schedule" ${defaultUseTimeSchedule ? 'checked' : ''} style="margin: 0;">
-                    <span style="font-size: 0.85rem; color: var(--text-primary); line-height: 1.3;">Use Time Schedule as a Segment cover page</span>
+            <div class="option-row">
+                <label class="option-check">
+                    <input type="checkbox" id="use-english-names" ${currentLanguage === 'en' ? 'checked' : ''}>
+                    <span>Use English category names</span>
                 </label>
             </div>
 
-            <div style="border-top: 1px solid var(--border-color); padding-top: 0.75rem;">
-                <button id="toggle-advanced-options" class="btn btn-ghost btn-xs" style="padding-left: 0; font-size: 0.8rem;">Show Per-Segment Settings ▸</button>
-                <div id="segment-options-list" class="hidden" style="margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; max-height: 300px; overflow-y: auto;">
+            <div class="option-row">
+                <label class="option-check">
+                    <input type="checkbox" id="global-use-time-schedule" ${defaultUseTimeSchedule ? 'checked' : ''}>
+                    <span>Use Time Schedule as a Segment cover page</span>
+                </label>
+            </div>
+
+            <div class="option-advanced">
+                <button id="toggle-advanced-options" class="btn btn-ghost btn-xs" style="padding-left: 0;">Show Per-Segment Settings ▸</button>
+                <div id="segment-options-list" class="segment-options-list hidden">
                     ${segments.map(s => `
-                        <label style="display: flex; align-items: start; gap: 0.5rem; font-size: 0.8rem;">
-                            <input type="checkbox" class="time-schedule-toggle" data-prefix="${s.prefix}" ${defaultUseTimeSchedule ? 'checked' : ''} style="margin-top: 0.15rem;">
-                            <span style="line-height: 1.3;">${s.label}</span>
+                        <label class="segment-option">
+                            <input type="checkbox" class="time-schedule-toggle" data-prefix="${s.prefix}" ${defaultUseTimeSchedule ? 'checked' : ''}>
+                            <span>${s.label}</span>
                         </label>
                     `).join('')}
                 </div>
@@ -1065,9 +1062,9 @@ async function init() {
         
         // Add Checkbox
         modalExtra.innerHTML = `
-            <label style="display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.875rem; cursor: pointer;">
+            <label class="modal-check">
                 <input type="checkbox" id="confirm-delete-checkbox" style="margin-top: 0.25rem;">
-                <span style="color: var(--text-primary);">I understand that this action is permanent.</span>
+                <span>I understand that this action is permanent.</span>
             </label>
         `;
 
@@ -1231,8 +1228,8 @@ function setupUserMenu(container: HTMLElement, user: ClientPrincipal) {
                 </svg>
             </button>
             <div id="user-dropdown" class="dropdown-menu">
-                <div style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--border-color); font-size: 0.75rem; color: var(--text-secondary);">
-                    Signed in as <br> <strong style="color: var(--text-primary);">${escapeHtml(user.userDetails)}</strong>
+                <div class="dropdown-header">
+                    Signed in as <br> <strong>${escapeHtml(user.userDetails)}</strong>
                 </div>
                 <a href="/.auth/logout?post_logout_redirect_uri=/" class="dropdown-item">Sign Out</a>
             </div>
