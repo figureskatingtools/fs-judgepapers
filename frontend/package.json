@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@figureskatingtools/shared-ui": "^2.0.5"
+    "@figureskatingtools/shared-ui": "^2.2.0"
   },
   "overrides": {
     "tmp": "^0.2.7"
