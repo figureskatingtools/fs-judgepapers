@@ -1,6 +1,7 @@
 import './style.css'
 import { renderSiteNav, initSiteNav, injectSiteNavStyles } from '@figureskatingtools/shared-ui';
 import { validateCategory, validateCompetition } from './validate';
+import { renderHelpTrigger, filesHelpHtml, initHelp } from './help';
 
 // Inject the shared figureskatingtools.com nav styles once at startup
 injectSiteNavStyles();
@@ -166,7 +167,10 @@ appElement.innerHTML = `
 
                 <!-- Upload Area -->
                 <div id="comp-upload-area" class="upload-area" style="flex: 1; margin: 0; display: flex; flex-direction: column; justify-content: center; align-items: center;">
-                    <p class="upload-title">Drag & Drop PDF files here</p>
+                    <div class="upload-title-row">
+                        <p class="upload-title">Drag & Drop PDF files here</p>
+                        ${renderHelpTrigger('help-files', 'Which files do I need?', filesHelpHtml(), 'help-wrap--right')}
+                    </div>
                     <p class="upload-or">or</p>
                     <button id="browse-files-btn" class="btn btn-sm btn-primary">Browse Files</button>
                     <input type="file" id="file-input" multiple accept=".pdf" style="display: none;">
@@ -219,7 +223,7 @@ appElement.innerHTML = `
             <h3 style="font-size: 1.15rem; margin-bottom: 0.75rem;">How to use:</h3>
             <ol class="howto-list">
                 <li>Click <strong>New Competition</strong> to create a workspace for your event.</li>
-                <li>Open the competition and <strong>upload the PDF files</strong> exported from <em>Figure Skating Manager</em>.</li>
+                <li>Open the competition and <strong>upload the PDF exports</strong> from <em>Figure Skating Manager</em> ${renderHelpTrigger('help-files-welcome', 'Which files do I need?', filesHelpHtml())}<br><span class="howto-caution">Export <strong>PlannedProgramContent</strong>, not <strong>PlannedProgramContentChecklist</strong> &mdash; they look similar but the Checklist won't work.</span></li>
                 <li>The system will automatically validate the files and ensure all required documents are present.</li>
                 <li>Once validated, click <strong>Generate Papers</strong> to create the combined PDF booklets and ZIP archives.</li>
                 <li>Download the generated files using the links that appear. You can also copy the links to share them.</li>
@@ -251,6 +255,9 @@ function showView(viewId: string) {
 }
 
 async function init() {
+  // Question-mark popovers (the shell template is already in the DOM)
+  initHelp();
+
   const loadingView = document.getElementById('loading-view')!;
   const errorView = document.getElementById('error-view')!;
   const landingView = document.getElementById('landing-view')!;
@@ -479,8 +486,13 @@ async function init() {
 
         for (const category of categories) {
             const segments = structure[category];
-            // System is always ISU for Figure Skating now
-            const validation = validateCategory(segments);
+            // System is always ISU for Figure Skating now.
+            // 'Uncategorized' holds files with an unrecognized category prefix —
+            // show them so the user can delete them, but don't demand the
+            // standard file set or block Generate on them.
+            const validation = category === 'Uncategorized'
+                ? { isValid: true, missingFiles: [] as string[] }
+                : validateCategory(segments);
             
             if (!validation.isValid) {
                 isGlobalValid = false;

@@ -23,24 +23,28 @@ export interface CompetitionValidationResult {
     missingFiles: string[];
 }
 
-const COMMON_FILES = [
+export const COMMON_FILES = [
     'StartListwithTimes.pdf',
     'ISUPanelofJudgesandTechnicalPanel.pdf',
     'JudgesSheetAll.pdf',
     'RefereeSheet.pdf'
 ];
 
-const ISU_ONLY_FILES = [
+export const ISU_ONLY_FILES = [
     'PlannedProgramContent.pdf',
     'TechnicalControllerSheet.pdf',
     'TechnicalSpecialistSheet' // Special handling for regex/prefix
 ];
 
+/** Required once per category (not per segment). */
+export const CATEGORY_GENERAL_FILE = 'CalculationSetupVerificationforReferee.pdf';
+
 /**
- * Segments to skip during per-segment validation (these are meta-segments,
- * not actual skating segments that require the standard file set).
+ * Segments to skip during per-segment validation: meta-segments that aren't
+ * actual skating segments requiring the standard file set, plus 'Unknown' —
+ * the backend's bucket for files whose segment marker couldn't be parsed.
  */
-const SKIP_SEGMENTS = ['Category General', 'General'];
+const SKIP_SEGMENTS = ['Category General', 'General', 'Unknown'];
 
 /**
  * Validates competition-level requirements (files needed across all categories).
@@ -67,10 +71,15 @@ export function validateCategory(
     // My python logic: elif "CalculationSetupVerificationforReferee" in suffix: segment = "Category General"
     
     const allFiles = Object.values(segments).flat();
-    const hasCalcSetup = allFiles.some(f => f.suffix === 'CalculationSetupVerificationforReferee.pdf');
-    
-    if (!hasCalcSetup) {
-        missing.push('CalculationSetupVerificationforReferee.pdf (Category General)');
+    const hasCalcSetup = allFiles.some(f => f.suffix === CATEGORY_GENERAL_FILE);
+
+    // Only required when the category has at least one real segment — a
+    // category consisting solely of skipped segments (e.g. only unknown-
+    // segment files) has nothing to validate.
+    const realSegments = Object.keys(segments).filter(s => !SKIP_SEGMENTS.includes(s));
+
+    if (realSegments.length > 0 && !hasCalcSetup) {
+        missing.push(`${CATEGORY_GENERAL_FILE} (Category General)`);
     }
 
     // 2. Check per-segment files
