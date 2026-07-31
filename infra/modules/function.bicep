@@ -89,7 +89,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       }
       runtime: {
         name: 'python'
-        version: '3.11'
+        version: '3.13'
       }
       scaleAndConcurrency: {
         maximumInstanceCount: 100
