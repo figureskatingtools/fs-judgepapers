@@ -479,8 +479,13 @@ async function init() {
 
         for (const category of categories) {
             const segments = structure[category];
-            // System is always ISU for Figure Skating now
-            const validation = validateCategory(segments);
+            // System is always ISU for Figure Skating now.
+            // 'Uncategorized' holds files with an unrecognized category prefix —
+            // show them so the user can delete them, but don't demand the
+            // standard file set or block Generate on them.
+            const validation = category === 'Uncategorized'
+                ? { isValid: true, missingFiles: [] as string[] }
+                : validateCategory(segments);
             
             if (!validation.isValid) {
                 isGlobalValid = false;

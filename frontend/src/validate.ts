@@ -37,10 +37,11 @@ const ISU_ONLY_FILES = [
 ];
 
 /**
- * Segments to skip during per-segment validation (these are meta-segments,
- * not actual skating segments that require the standard file set).
+ * Segments to skip during per-segment validation: meta-segments that aren't
+ * actual skating segments requiring the standard file set, plus 'Unknown' —
+ * the backend's bucket for files whose segment marker couldn't be parsed.
  */
-const SKIP_SEGMENTS = ['Category General', 'General'];
+const SKIP_SEGMENTS = ['Category General', 'General', 'Unknown'];
 
 /**
  * Validates competition-level requirements (files needed across all categories).
@@ -68,8 +69,13 @@ export function validateCategory(
     
     const allFiles = Object.values(segments).flat();
     const hasCalcSetup = allFiles.some(f => f.suffix === 'CalculationSetupVerificationforReferee.pdf');
-    
-    if (!hasCalcSetup) {
+
+    // Only required when the category has at least one real segment — a
+    // category consisting solely of skipped segments (e.g. only unknown-
+    // segment files) has nothing to validate.
+    const realSegments = Object.keys(segments).filter(s => !SKIP_SEGMENTS.includes(s));
+
+    if (realSegments.length > 0 && !hasCalcSetup) {
         missing.push('CalculationSetupVerificationforReferee.pdf (Category General)');
     }
 
