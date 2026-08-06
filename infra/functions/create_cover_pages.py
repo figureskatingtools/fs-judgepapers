@@ -7,11 +7,28 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 # --- Helper Functions ---
 
 FOOTER_TEXT = "Created with Figureskatingtools.com - Supporting the Figure Skating Community"
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+FONTS_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
+
+
+def _register_fonts():
+    # Best-effort: fall back to Helvetica rather than fail cover generation
+    try:
+        pdfmetrics.registerFont(TTFont("Raleway", os.path.join(FONTS_DIR, "Raleway-Regular.ttf")))
+        pdfmetrics.registerFont(TTFont("Raleway-Bold", os.path.join(FONTS_DIR, "Raleway-Bold.ttf")))
+        return "Raleway", "Raleway-Bold"
+    except Exception as e:
+        print(f"Could not register Raleway fonts, falling back to Helvetica: {e}")
+        return "Helvetica", "Helvetica-Bold"
+
+
+FONT_REGULAR, FONT_BOLD = _register_fonts()
 
 def slugify(text):
     text = text.lower()
@@ -124,9 +141,9 @@ def _draw_footer(c, x_start, x_end, footer_y_line=25 * mm, footer_y_text=20 * mm
 
     # Shrink font from 8pt until the text fits the available width
     size = 8
-    while size > 5 and c.stringWidth(FOOTER_TEXT, "Helvetica", size) > (x_end - x_start):
+    while size > 5 and c.stringWidth(FOOTER_TEXT, FONT_REGULAR, size) > (x_end - x_start):
         size -= 0.5
-    c.setFont("Helvetica", size)
+    c.setFont(FONT_REGULAR, size)
     c.drawRightString(x_end, footer_y_text, FOOTER_TEXT)
 
 def create_cover_pdf(output_path, competition_name, date_obj, person_name):
@@ -151,7 +168,7 @@ def create_cover_pdf(output_path, competition_name, date_obj, person_name):
     except Exception as e:
         print(f"Could not draw logo on cover page: {e}")
 
-    c.setFont("Helvetica", 12)
+    c.setFont(FONT_REGULAR, 12)
 
     # Draw Competition Name
     c.drawString(x_pos, y_start, competition_name)
@@ -179,31 +196,31 @@ def create_segment_cover_pdf(output_path, competition_name, date_obj, segment_na
     # Layout (Top-down)
     y_pos = height - 100 * mm
     
-    c.setFont("Helvetica-Bold", 16)
+    c.setFont(FONT_BOLD, 16)
     c.drawCentredString(center_x, y_pos, competition_name)
     
     y_pos -= 20 * mm
-    c.setFont("Helvetica", 14)
+    c.setFont(FONT_REGULAR, 14)
     date_str = date_obj.strftime("%d.%m.%Y")
     c.drawCentredString(center_x, y_pos, date_str)
     
     # Category name (if provided)
     if category_name:
         y_pos -= 30 * mm
-        c.setFont("Helvetica-Bold", 18)
+        c.setFont(FONT_BOLD, 18)
         c.drawCentredString(center_x, y_pos, category_name)
     
     y_pos -= 25 * mm
-    c.setFont("Helvetica-Bold", 20)
+    c.setFont(FONT_BOLD, 20)
     c.drawCentredString(center_x, y_pos, segment_name)
     
     # Withdrawn competitors list (only if there are any)
     if withdrawn_competitors:
         y_pos -= 20 * mm
-        c.setFont("Helvetica-Bold", 14)
+        c.setFont(FONT_BOLD, 14)
         c.drawCentredString(center_x, y_pos, "Withdrawn:")
         
-        c.setFont("Helvetica", 12)
+        c.setFont(FONT_REGULAR, 12)
         for name in withdrawn_competitors:
             y_pos -= 8 * mm
             c.drawCentredString(center_x, y_pos, name)

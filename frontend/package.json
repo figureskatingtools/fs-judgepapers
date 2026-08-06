@@ -12,7 +12,8 @@
     "@figureskatingtools/shared-ui": "^2.2.0"
   },
   "overrides": {
-    "tmp": "^0.2.7"
+    "tmp": "^0.2.7",
+    "adm-zip": "^0.6.0"
   },
   "devDependencies": {
     "@azure/static-web-apps-cli": "^2.0.10",
