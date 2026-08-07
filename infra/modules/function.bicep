@@ -4,14 +4,10 @@ param appServicePlanName string
 param appInsightsName string
 param storageAccountName string
 param deploymentContainerUrl string
-param allowedOrigins array = []
-param authClientId string = ''
-param authManagedIdentityClientId string = ''
-param authManagedIdentityResourceId string = ''
-param tenantId string = ''
 
-// Shared secret the Web App proxy sends as X-Proxy-Secret. Empty = the
-// function doesn't enforce it (local/dev). See function_app.py:_proxy_secret_ok.
+// Shared secret the site router proxy sends as X-Proxy-Secret. Empty = the
+// function doesn't enforce it (local/dev). See function_app.py:_proxy_secret_ok
+// and PROXY-CONTRACT.md.
 @secure()
 param proxySharedSecret string = ''
 
@@ -41,19 +37,20 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   location: location
   kind: 'functionapp,linux'
   identity: {
-    type: 'SystemAssigned,UserAssigned'
-    userAssignedIdentities: {
-      '${authManagedIdentityResourceId}': {}
-    }
+    type: 'SystemAssigned'
   }
   properties: {
     serverFarmId: appServicePlan.id
     siteConfig: {
+      // No CORS origins: the browser never talks to this Function App directly.
+      // All traffic arrives server-side from the site router proxy
+      // (figureskatingtools.com/<tool>/api/*), so cross-origin access is never
+      // needed. An empty array also clears origins left by a prior deploy.
       cors: {
-        allowedOrigins: allowedOrigins
+        allowedOrigins: []
       }
       // Explicitly no inbound IP restrictions. The endpoint must stay reachable
-      // by the Web App proxy AND by the CI deploy's sync-triggers/health-check
+      // by the site router proxy AND by the CI deploy's sync-triggers/health-check
       // (a Deny lock 403s the GitHub runner and hangs the pipeline). An empty
       // array also clears any restriction left over from a prior deploy.
       ipSecurityRestrictions: []
@@ -66,10 +63,6 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
           value: appInsights.properties.ConnectionString
-        }
-        {
-          name: 'OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID'
-          value: authManagedIdentityClientId
         }
         {
           name: 'PROXY_SHARED_SECRET'
@@ -103,30 +96,15 @@ resource authSettings 'Microsoft.Web/sites/config@2022-03-01' = {
   parent: functionApp
   name: 'authsettingsV2'
   properties: {
-    // The Web App handles the real Entra login and proxies requests here,
-    // forwarding the user's email. The Function App must allow anonymous so
-    // those proxied requests reach the app, which authorizes via the forwarded
-    // header (get_user_email_from_header). The AAD provider stays enabled so a
-    // bearer token is still validated when one is present.
+    // The site router (figureskatingtools.com) handles the real Entra login and
+    // proxies requests here, forwarding the user's email plus the shared
+    // secret. The Function App must allow anonymous so those proxied requests
+    // reach the app, which authorizes via the forwarded header
+    // (get_user_email_from_header — see PROXY-CONTRACT.md). No identity
+    // provider is registered here: this app has no login surface of its own.
     globalValidation: {
       requireAuthentication: false
       unauthenticatedClientAction: 'AllowAnonymous'
-    }
-    identityProviders: {
-      azureActiveDirectory: {
-        enabled: !empty(authClientId)
-        registration: {
-          clientId: authClientId
-          clientSecretSettingName: 'OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID'
-          openIdIssuer: '${environment().authentication.loginEndpoint}${tenantId}/v2.0'
-        }
-        validation: {
-          allowedAudiences: [
-            authClientId
-            'api://${authClientId}'
-          ]
-        }
-      }
     }
     login: {
       tokenStore: {

@@ -6,37 +6,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Web app that generates judging packets for figure skating competitions. Users upload PDF exports from Figure Skating Manager (FSM); the backend splits, categorizes, and merges them into per-judge/referee/official PDF packets. UI is bilingual (Finnish default, English).
 
+**This repo is backend-only.** The frontend was moved to the `figureskatingtools-site` repo, which serves it at `https://figureskatingtools.com/judgepapers/` and proxies `/judgepapers/api/*` here. The local `frontend/` directory is legacy: it is no longer built, deployed, or referenced by CI, and will be deleted at teardown. `PROXY-CONTRACT.md` is the authoritative description of the router → Function App contract.
+
 ## Commands
 
 ```bash
-# Full local stack (Functions backend + Vite dev server + SWA CLI auth emulator)
-./start_locally.sh
-
-# Frontend only (cd frontend)
-npm install
-npm run dev        # Vite dev server on :5173
-npm run build      # tsc + vite build
-
-# Backend only (cd infra/functions)
+# Backend (cd infra/functions)
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 func start         # Azure Functions on :7071 (requires local.settings.json, see README)
 
-# Deployment (manual; CI does this automatically on push to test/main)
-./deploy_infra.sh --client-id <ENTRA_CLIENT_ID>   # Bicep, subscription-scoped
-./deploy_backend.sh -g <resource-group>            # Functions ZIP deploy
-./deploy_frontend.sh -g <resource-group>           # Vite build + server.js → Web App
+# Exercise an endpoint the way the site router does (see PROXY-CONTRACT.md)
+curl -s http://localhost:7071/api/check_user_permission \
+  -H 'x-forwarded-user-email: you@example.com'
+
+# Deployment (manual; CI does this automatically on push to main / dispatch)
+./deploy_infra.sh [--proxy-secret <SECRET>]   # Bicep, subscription-scoped
+./deploy_backend.sh -g <resource-group>       # Functions ZIP deploy
 ```
 
-There are no tests and no linter configured. Local dev requires accessing the app through the SWA CLI emulator (`:4280`), not Vite directly — Vite has no `/api` proxy; SWA CLI routes `/api/*` to the Functions host and emulates Easy Auth.
+There are no tests and no linter configured. To drive the backend from a UI, run the frontend from the `figureskatingtools-site` repo and point its judgepapers function-app URL at `http://localhost:7071`. `start_locally.sh`, `deploy_frontend.sh` and `create_auth_app.sh` are leftovers of the old per-tool Web App and no longer reflect how this tool is hosted.
 
 ## Architecture
 
-Three pieces, deployed separately:
+Two pieces deployed from here, plus a frontend that lives elsewhere:
 
-1. **Frontend** (`frontend/`) — No-framework TypeScript SPA. Almost all UI logic lives in `src/main.ts` (~1200 lines of view-rendering functions that write `innerHTML`); `src/validate.ts` checks that each category/segment has the required FSM file set. In production it's served by `frontend/server.js`, a zero-dependency Node HTTP server that serves static files, exposes `/userinfo`, and proxies `/api/*` to the Function App.
-
-   The site banner/nav comes from **`@figureskatingtools/shared-ui`** (published to GitHub Packages from the `figureskatingtools-site` repo) — `renderSiteNav` is rendered into `#site-nav-container` by `init()` once auth state is known, with the app's own nav (Competitions / New Competition) as `appNavItems` dropdown entries wired via `[data-nav-action]` listeners, and the user menu rendered into the nav's `#fst-nav-right` slot. **`npm install` requires auth**: GitHub Packages needs a token with `read:packages` even for reads — set `NODE_AUTH_TOKEN` (e.g. `NODE_AUTH_TOKEN=$(gh auth token) npm install`; the token substitution lives in `frontend/.npmrc`). CI uses the workflow `GITHUB_TOKEN` via `packages: read` permission. To change the shared banner (e.g. add a tool), edit `DEFAULT_TOOLS` in the figureskatingtools-site repo's `packages/shared-ui`, bump its version, and `npm update` here.
+1. **Frontend** — *no longer in this repo.* The `figureskatingtools-site` repo hosts a single App Service that serves every tool's UI (`/judgepapers/`, `/scoremodifier/`, …), owns Easy Auth and the `figureskatingtools.com` domain, and proxies `/judgepapers/api/*` to the Function App deployed here. The legacy `frontend/` directory is dead code kept only until teardown; do not edit it, and do not restore it to CI.
 
 2. **Backend** (`infra/functions/`) — Python Azure Functions, all HTTP-triggered, defined in `function_app.py`. The PDF pipeline lives in plain modules called by the `generate_judging_papers` endpoint:
    - `processor.py` — orchestrator: parse CompetitionSchedule → extract segment names → split judge sheets → generate cover pages → merge per-person packets → ZIP. Runs on local temp dirs after downloading blobs.
@@ -46,15 +41,17 @@ Three pieces, deployed separately:
    - `categories.py` — table-driven category lookup (see below).
    - `competition_schedule.py` — parses the CompetitionSchedule PDF for start times.
 
-3. **Infra** (`infra/main.bicep` + `modules/`) — subscription-scoped Bicep: resource group, storage, Function App, Web App, user-assigned managed identity for Easy Auth (federated credential, no client secret), RBAC. Per-env params in `infra/parameters/{test,prod}.bicepparam`. Custom domains (`judgepapers.figureskatingtools.com` prod, `test.judgepapers.figureskatingtools.com` test) are bound by `dns.bicep` (CNAME + asuid TXT in the shared `figureskatingtools.com` zone in `rg-fs-dns`, which is deployed by the separate landing-page repo) plus `webapp-customdomain.bicep`/`sni-enable.bicep` (hostname binding → managed cert → SNI, split across modules due to Azure's two-PUT constraint). Driven by the `customDomain` param / `CUSTOM_DOMAIN` GitHub environment variable.
+3. **Infra** (`infra/main.bicep` + `modules/`) — subscription-scoped Bicep, backend-only: resource group, storage (`storage.bicep`), Function App + App Insights (`function.bicep`, Flex Consumption, **SystemAssigned identity only**, CORS empty), and storage RBAC (`roleassignment.bicep`). Params are just `resourceGroupName`, `location` and the secure `proxySharedSecret`; per-env values in `infra/parameters/{test,prod}.bicepparam`. `main.bicep` exports `functionPrincipalId` so the site repo can grant this Function App read access to the shared competition-data container. **No Web App, managed identity, DNS or custom-domain modules live here any more** — hosting, Easy Auth, the `figureskatingtools.com` zone and all custom domains belong to the `figureskatingtools-site` repo.
 
 ### Auth chain (important when touching any endpoint)
 
-All function routes are `AuthLevel.ANONYMOUS`; real auth is Entra ID Easy Auth on the Web App. Identity flows: Easy Auth injects `X-MS-CLIENT-PRINCIPAL*` headers → `server.js` extracts the email and forwards it as `X-Forwarded-User-Email` to the Function App → `get_user_email_from_header()` in `function_app.py` tries (in order) direct Easy Auth header, forwarded header, base64 SWA principal, then Bearer JWT claims. Every endpoint must call it and return 401 on `None`. `is_user_allowed()` currently allows all authenticated users and is the hook for a future allowlist.
+Full details in **`PROXY-CONTRACT.md`** (keep it in sync when touching this). Summary:
 
-**The Function App itself must be `AllowAnonymous`** (`function.bicep` `globalValidation`), *not* `requireAuthentication: true` — the proxy forwards only the email header, no bearer token, so Easy Auth enforcement would 401 every proxied request (`WWW-Authenticate: Bearer`, empty body) before the app's header check runs.
+All function routes are `AuthLevel.ANONYMOUS`; real auth is Entra ID Easy Auth on the site router. Identity flows: Easy Auth injects `X-MS-CLIENT-PRINCIPAL*` headers on the router → the router extracts the email and forwards it as `X-Forwarded-User-Email` (plus `X-Proxy-Secret`) to the Function App → `get_user_email_from_header()` in `function_app.py` checks the shared secret first, then tries (in order) direct Easy Auth header, forwarded header, base64 SWA principal, then Bearer JWT claims. Every endpoint must call it and return 401 on `None`. `is_user_allowed()` currently allows all authenticated users and is the hook for a future allowlist.
 
-Because the function endpoint is public, a **shared secret** stops anyone from calling it directly with a spoofed email header: the Web App holds `PROXY_SHARED_SECRET`, `server.js` sends it as `X-Proxy-Secret` on every proxied call, and `_proxy_secret_ok()` (called first in `get_user_email_from_header`) rejects requests whose header doesn't match → 401. **Enforced only when the env var is set** (local/dev and brief pre-rollout windows fail open). The secret is a per-environment GitHub Environment secret, injected into the Function App via the `proxySharedSecret` Bicep param (in the authoritative `appSettings` array) and into the Web App via the deploy workflow's `az webapp config appsettings set`. Two rejected alternatives: inbound **IP restrictions** `403` the GitHub runner during the Flex deploy's sync-triggers/health-check and hang the pipeline; **Network Security Perimeter** can't hold `Microsoft.Web` apps (not an onboarded NSP resource type).
+**The Function App itself must be `AllowAnonymous`** (`function.bicep` `globalValidation`), *not* `requireAuthentication: true` — the router forwards only the email header, no bearer token, so Easy Auth enforcement would 401 every proxied request (`WWW-Authenticate: Bearer`, empty body) before the app's header check runs. No identity provider is registered on the Function App at all.
+
+Because the function endpoint is public, a **shared secret** stops anyone from calling it directly with a spoofed email header: the router holds the secret and sends it as `X-Proxy-Secret` on every proxied call, and `_proxy_secret_ok()` (called first in `get_user_email_from_header`) rejects requests whose header doesn't match → 401. **Enforced only when the env var is set** (local/dev and brief pre-rollout windows fail open). The secret is a per-environment GitHub Environment secret here, injected into the Function App via the `proxySharedSecret` Bicep param (in the authoritative `appSettings` array); the same value lives in the site repo as `PROXY_SHARED_SECRET_JUDGEPAPERS`. Two rejected alternatives: inbound **IP restrictions** `403` the GitHub runner during the Flex deploy's sync-triggers/health-check and hang the pipeline; **Network Security Perimeter** can't hold `Microsoft.Web` apps (not an onboarded NSP resource type).
 
 ### Storage layout & dual credential pattern
 
@@ -77,7 +74,7 @@ Human-readable segment names aren't in filenames; they're extracted from line 2 
 
 ## Branch / Deploy Strategy
 
-`test` → `main` promote via PRs, merged with **squash** (one commit per release on `main`). `.github/workflows/deploy.yml` deploys infra (Bicep), backend, and frontend to the matching GitHub environment: **push to `main` auto-deploys prod**; **`test` is manual-only** via `workflow_dispatch` (run the workflow from the branch whose code you want, pick the environment) — there is no `test`-branch push trigger. This mirrors the figureskatingtools-site repo. The workflow also patches the Entra app registration (redirect URIs, federated identity credential) and disables the Easy Auth token store.
+`test` → `main` promote via PRs, merged with **squash** (one commit per release on `main`). `.github/workflows/deploy.yml` has two deploy jobs — infra (Bicep) then backend (Functions ZIP) — targeting the matching GitHub environment: **push to `main` auto-deploys prod**; **`test` is manual-only** via `workflow_dispatch` (run the workflow from the branch whose code you want, pick the environment) — there is no `test`-branch push trigger. This mirrors the figureskatingtools-site repo. There is **no frontend job and no Entra/Graph step** any more; the environments need only `AZURE_CLIENT_ID` + `PROXY_SHARED_SECRET` secrets and the `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` / `LOCATION` / `RESOURCE_GROUP_NAME` vars (`AUTH_CLIENT_ID`, `AUTH_APP_OBJECT_ID` and `CUSTOM_DOMAIN` are obsolete and can be deleted).
 
 **After every squash-merge to `main`, reset `test` to `main`** — squash creates a new commit on `main`, so without this every future PR re-lists all old commits:
 

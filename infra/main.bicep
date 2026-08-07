@@ -1,34 +1,21 @@
 targetScope = 'subscription'
 
+// Backend-only infrastructure. The frontend (and its Easy Auth / custom domain /
+// DNS) now lives in the figureskatingtools-site repo, which hosts every tool on
+// https://figureskatingtools.com/<tool>/ and proxies /<tool>/api/* to the
+// Function App deployed here. This template therefore only creates storage, the
+// Function App (+ App Insights) and the storage role assignments.
 param location string = 'swedencentral'
 param resourceGroupName string = ''
-param authClientId string = ''
-param tenantId string = ''
 
-// Shared secret between the Web App proxy and the Function App (see function.bicep).
+// Shared secret between the site router proxy and the Function App (see
+// function.bicep / function_app.py:_proxy_secret_ok and PROXY-CONTRACT.md).
 @secure()
 param proxySharedSecret string = ''
-
-// Custom domain for the web app (e.g. 'judgepapers.figureskatingtools.com').
-// Empty = skip DNS + domain binding. The DNS zone itself is deployed by the
-// root frontend site (figureskatingtools.com landing page); this deployment
-// only manages its own record sets in that zone.
-param customDomain string = ''
-param dnsZoneName string = 'figureskatingtools.com'
-param dnsZoneResourceGroup string = 'rg-fs-dns'
 
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
   name: resourceGroupName
   location: location
-}
-
-module authManagedIdentity 'modules/auth-identity.bicep' = {
-  scope: rg
-  name: 'authIdentityDeployment'
-  params: {
-    location: location
-    managedIdentityName: 'mi-fs-judgepapers-auth-${uniqueString(rg.id)}'
-  }
 }
 
 module storage 'modules/storage.bicep' = {
@@ -38,20 +25,6 @@ module storage 'modules/storage.bicep' = {
     location: location
     storageAccountName: 'stfsjudge${uniqueString(rg.id)}'
     containerName: 'fs-judgepapers'
-  }
-}
-
-module webApp 'modules/webapp.bicep' = {
-  scope: rg
-  name: 'webAppDeployment'
-  params: {
-    location: location
-    webAppName: 'app-fs-judgepapers-${uniqueString(rg.id)}'
-    appServicePlanName: 'asp-fs-judgepapers-web'
-    authClientId: authClientId
-    authManagedIdentityClientId: authManagedIdentity.outputs.clientId
-    authManagedIdentityResourceId: authManagedIdentity.outputs.resourceId
-    tenantId: !empty(tenantId) ? tenantId : subscription().tenantId
   }
 }
 
@@ -65,42 +38,8 @@ module function 'modules/function.bicep' = {
     appInsightsName: 'ai-fs-judgepapers'
     storageAccountName: storage.outputs.storageAccountName
     deploymentContainerUrl: 'https://${storage.outputs.storageAccountName}.blob.${environment().suffixes.storage}/app-package'
-    allowedOrigins: [
-      'https://${webApp.outputs.webAppDefaultHostName}'
-    ]
-    authClientId: authClientId
-    authManagedIdentityClientId: authManagedIdentity.outputs.clientId
-    authManagedIdentityResourceId: authManagedIdentity.outputs.resourceId
-    tenantId: !empty(tenantId) ? tenantId : subscription().tenantId
     proxySharedSecret: proxySharedSecret
   }
-}
-
-// DNS records (CNAME + asuid TXT) in the shared figureskatingtools.com zone
-module dns 'modules/dns.bicep' = if (!empty(customDomain)) {
-  scope: resourceGroup(dnsZoneResourceGroup)
-  name: 'dnsDeployment'
-  params: {
-    dnsZoneName: dnsZoneName
-    recordName: replace(customDomain, '.${dnsZoneName}', '')
-    targetHostname: webApp.outputs.webAppDefaultHostName
-    domainVerificationId: webApp.outputs.customDomainVerificationId
-  }
-}
-
-// Hostname binding + managed certificate (requires DNS records above)
-module webAppCustomDomain 'modules/webapp-customdomain.bicep' = if (!empty(customDomain)) {
-  scope: rg
-  name: 'customDomainDeployment'
-  params: {
-    webAppName: webApp.outputs.webAppName
-    customDomain: customDomain
-    appServicePlanId: webApp.outputs.appServicePlanId
-    location: location
-  }
-  dependsOn: [
-    dns
-  ]
 }
 
 module roleAssignment 'modules/roleassignment.bicep' = {
@@ -115,8 +54,7 @@ module roleAssignment 'modules/roleassignment.bicep' = {
 output resourceGroupName string = rg.name
 output storageAccountName string = storage.outputs.storageAccountName
 output functionAppName string = function.outputs.functionAppName
-output webAppName string = webApp.outputs.webAppName
-output webAppDefaultHostName string = webApp.outputs.webAppDefaultHostName
-output authManagedIdentityClientId string = authManagedIdentity.outputs.clientId
-output authManagedIdentityObjectId string = authManagedIdentity.outputs.principalId
-output customDomain string = customDomain
+
+// Consumed by the site repo (TOOL_PRINCIPAL_ID_JUDGEPAPERS) so the shared
+// competition-data container can grant this Function App read access.
+output functionPrincipalId string = function.outputs.functionPrincipalId
