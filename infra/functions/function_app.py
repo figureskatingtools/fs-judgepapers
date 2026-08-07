@@ -6,6 +6,7 @@ import shutil
 import base64
 import json
 import re
+import unicodedata
 import io
 from pypdf import PdfReader
 from datetime import datetime
@@ -27,7 +28,7 @@ MAX_UPLOAD_SIZE = 25 * 1024 * 1024
 # Automatic competition deletion: lifetime after creation, extension per
 # "extend" click, and the fixed migration date for rows created before this
 # feature existed (rows missing DeletionDate).
-DELETION_RETENTION_DAYS = 30
+DELETION_RETENTION_DAYS = 60
 DELETION_EXTENSION_DAYS = 7
 LEGACY_DELETION_DATE = "2026-06-12T00:00:00Z"
 AUTO_CLEANUP_ACTOR = "auto-cleanup"
@@ -188,6 +189,20 @@ def get_table_client(table_name="generatedpapers"):
 def sanitize_name(name: str) -> str:
     """Sanitize a competition display name: keep alphanumerics, spaces, hyphens, underscores."""
     return "".join([c for c in name if c.isalnum() or c in (' ', '-', '_')]).strip()
+
+
+def normalize_competition_name(name) -> str:
+    """
+    Normalize a competition name for platform matching: NFKD diacritic folding,
+    alphanumerics only, casefold. Mirrors the site's shared-ui
+    `normalizeCompetitionCode` semantics so "Kevät Cup 2026" and
+    "kevatcup2026"-style variants collapse to the same key.
+    """
+    if not name:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", str(name))
+    return "".join(c for c in decomposed
+                   if c.isalnum() and not unicodedata.combining(c)).casefold()
 
 
 def generate_competition_id(comp_table) -> str:
@@ -496,18 +511,62 @@ def list_competitions(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(json.dumps({"error": "Internal server error"}), status_code=500, mimetype="application/json")
 
 
+def create_competition_record(comp_table, blob_service_client, safe_name, email, platform_id=None):
+    """
+    Create a competition: the blob "folder" (its metadata.json) plus the
+    permanent competitions history row. Shared by `create_competition` and
+    `resolve_competition`; `platform_id` binds the record to the site's
+    platform competition (omitted for the legacy standalone create route).
+    Returns the created entity dict.
+    """
+    new_id = generate_competition_id(comp_table)
+    folder_path = f"{safe_name}-{new_id}"
+
+    # Create metadata.json file to establish the "folder"
+    now = datetime.utcnow()
+    metadata = {
+        "id": new_id,
+        "name": safe_name,
+        "createdBy": email,
+        "createdDate": f"{now.isoformat()}Z"
+    }
+    if platform_id:
+        metadata["platformId"] = platform_id
+
+    container = blob_service_client.get_container_client("fs-judgepapers")
+    container.upload_blob(f"{folder_path}/metadata.json", json.dumps(metadata, indent=4), overwrite=True)
+
+    # Permanent history row — never deleted, only hidden via Visible=False
+    entity = {
+        "PartitionKey": "GLOBAL",
+        "RowKey": new_id,
+        "Name": safe_name,
+        "FolderPath": folder_path,
+        "Visible": True,
+        "CreatedBy": metadata["createdBy"],
+        "CreatedDate": metadata["createdDate"],
+        "DeletionDate": f"{(now + timedelta(days=DELETION_RETENTION_DAYS)).isoformat()}Z",
+        "UploadedFileCount": 0,
+        "GenerateRunCount": 0
+    }
+    if platform_id:
+        entity["PlatformId"] = platform_id
+    comp_table.create_entity(entity)
+    return entity
+
+
 @app.route(route="create_competition", auth_level=func.AuthLevel.ANONYMOUS)
 def create_competition(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Creating competition...')
-    
+
     email = get_user_email_from_header(req)
     if not email:
         return func.HttpResponse("Unauthorized", status_code=401)
-        
+
     name = req.params.get('name')
     if not name:
         return func.HttpResponse("Missing name parameter", status_code=400)
-    
+
     # Sanitize name (names are NOT unique — the id is the identifier)
     safe_name = sanitize_name(name)
     if not safe_name:
@@ -526,40 +585,144 @@ def create_competition(req: func.HttpRequest) -> func.HttpResponse:
         try: comp_table.create_table()
         except: pass
 
-        new_id = generate_competition_id(comp_table)
-        folder_path = f"{safe_name}-{new_id}"
+        entity = create_competition_record(comp_table, blob_service_client, safe_name, email)
 
-        container = blob_service_client.get_container_client("fs-judgepapers")
-
-        # Create metadata.json file to establish the "folder"
-        now = datetime.utcnow()
-        metadata = {
-            "id": new_id,
-            "name": safe_name,
-            "createdBy": email,
-            "createdDate": f"{now.isoformat()}Z"
-        }
-
-        container.upload_blob(f"{folder_path}/metadata.json", json.dumps(metadata, indent=4), overwrite=True)
-
-        # Permanent history row — never deleted, only hidden via Visible=False
-        entity = {
-            "PartitionKey": "GLOBAL",
-            "RowKey": new_id,
-            "Name": safe_name,
-            "FolderPath": folder_path,
-            "Visible": True,
-            "CreatedBy": metadata["createdBy"],
-            "CreatedDate": metadata["createdDate"],
-            "DeletionDate": f"{(now + timedelta(days=DELETION_RETENTION_DAYS)).isoformat()}Z",
-            "UploadedFileCount": 0,
-            "GenerateRunCount": 0
-        }
-        comp_table.create_entity(entity)
-
-        return func.HttpResponse(json.dumps({"id": new_id, "name": safe_name}), mimetype="application/json")
+        return func.HttpResponse(json.dumps({"id": entity["RowKey"], "name": safe_name}), mimetype="application/json")
     except Exception as e:
         logging.error(f"Error creating competition: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+def _newest_competition(entities):
+    """Pick the entity with the newest CreatedDate (unparseable dates sort oldest)."""
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    return max(entities, key=lambda e: _parse_iso_utc(e.get("CreatedDate")) or oldest)
+
+
+def find_competition_by_platform_id(comp_table, platform_id):
+    """
+    Find the live competition bound to a platform competition GUID.
+
+    The PlatformId filter runs server-side; `Visible is False` is filtered in
+    Python because legacy rows lack the property altogether (a `Visible eq true`
+    filter would drop them). Soft-deleted rows keep their PlatformId but their
+    blobs are gone, so they must never be resurrected. Newest CreatedDate wins
+    if several visible rows share the id.
+    """
+    safe_pid = str(platform_id).replace("'", "''")
+    rows = list(comp_table.query_entities(
+        f"PartitionKey eq 'GLOBAL' and PlatformId eq '{safe_pid}'"
+    ))
+    visible = [e for e in rows if e.get("Visible") is not False]
+    if not visible:
+        return None
+    return _newest_competition(visible)
+
+
+def adopt_competition_by_name(comp_table, platform_id, name):
+    """
+    Link a pre-existing, unbound competition to a platform competition: a
+    visible row with no PlatformId whose normalized Name matches the platform
+    name gets PlatformId stamped on it (MERGE write) and is returned. Legacy
+    name-keyed rows (no FolderPath) are skipped — `list_competitions` re-keys
+    them, which would drop the binding. Returns None when nothing matches.
+    """
+    target = normalize_competition_name(name)
+    if not target:
+        return None
+
+    candidates = []
+    for entity in list(comp_table.query_entities("PartitionKey eq 'GLOBAL'")):
+        if entity.get("Visible") is False:
+            continue
+        if entity.get("PlatformId"):
+            continue
+        if "FolderPath" not in entity:
+            continue
+        if normalize_competition_name(entity.get("Name") or entity.get("RowKey")) != target:
+            continue
+        candidates.append(entity)
+
+    if not candidates:
+        return None
+
+    entity = _newest_competition(candidates)
+    comp_table.update_entity({
+        "PartitionKey": "GLOBAL",
+        "RowKey": entity["RowKey"],
+        "PlatformId": platform_id
+    }, mode=UpdateMode.MERGE)
+    entity["PlatformId"] = platform_id
+    logging.info(f"Adopted competition {entity['RowKey']} for platform id {platform_id}")
+    return entity
+
+
+def resolve_competition_record(comp_table, blob_service_client, platform_id, name, email):
+    """
+    Core of POST /resolve_competition: platform-id lookup -> name adoption ->
+    create. Pure with respect to HTTP (clients are injected) so it can be driven
+    by fakes. Returns the response payload dict {id, name, created}.
+    """
+    entity = find_competition_by_platform_id(comp_table, platform_id)
+    if entity is not None:
+        return {"id": entity["RowKey"], "name": entity.get("Name", entity["RowKey"]), "created": False}
+
+    entity = adopt_competition_by_name(comp_table, platform_id, name)
+    if entity is not None:
+        return {"id": entity["RowKey"], "name": entity.get("Name", entity["RowKey"]), "created": False}
+
+    safe_name = sanitize_name(name)
+    entity = create_competition_record(
+        comp_table, blob_service_client, safe_name, email, platform_id=platform_id
+    )
+    return {"id": entity["RowKey"], "name": safe_name, "created": True}
+
+
+@app.route(route="resolve_competition", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Bind the site's active platform competition to this tool's competition
+    record: look it up by PlatformId, else adopt a matching unbound record,
+    else create one. Body {platformId, name} -> {id, name, created}.
+    """
+    logging.info('Resolving platform competition...')
+
+    email = get_user_email_from_header(req)
+    if not email:
+        return func.HttpResponse("Unauthorized", status_code=401)
+
+    try:
+        req_body = req.get_json()
+    except ValueError:
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+
+    platform_id = (req_body or {}).get('platformId')
+    name = (req_body or {}).get('name')
+    if not platform_id or not isinstance(platform_id, str):
+        return func.HttpResponse("Missing platformId parameter", status_code=400)
+    if not name or not sanitize_name(str(name)):
+        return func.HttpResponse("Missing or invalid name parameter", status_code=400)
+
+    try:
+        blob_service_client = get_blob_service_client()
+        if not blob_service_client:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+
+        comp_table = get_table_client("competitions")
+        if not comp_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+
+        # Ensure table exists
+        try: comp_table.create_table()
+        except: pass
+
+        result = resolve_competition_record(
+            comp_table, blob_service_client, platform_id, str(name), email
+        )
+        logging.info(f"Resolved platform {platform_id} -> competition {result['id']} (created={result['created']})")
+        return func.HttpResponse(json.dumps(result), mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Error resolving competition: {e}")
         return func.HttpResponse("Internal server error", status_code=500)
 
 
@@ -1083,7 +1246,10 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
             "competitionFiles": competition_files,
             "alerts": alerts,
             "categories": list(detected_category_codes),
-            "generatedFiles": generated_links
+            "generatedFiles": generated_links,
+            # The site UI has no competition list anymore; retention (auto-delete
+            # date + extend) is surfaced in the detail view instead.
+            "deletionDate": entity.get("DeletionDate")
         }), mimetype="application/json")
     except Exception as e:
         logging.error(f"Error getting details: {e}")

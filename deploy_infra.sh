@@ -5,24 +5,16 @@ LOCATION="swedencentral"
 TEMPLATE_FILE="infra/main.bicep"
 
 # Initialize variables
-CLIENT_ID=""
 PROXY_SECRET=""
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        -c|--client-id) CLIENT_ID="$2"; shift ;;
         -s|--proxy-secret) PROXY_SECRET="$2"; shift ;;
-        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+        *) echo "Unknown parameter passed: $1"; echo "Usage: ./deploy_infra.sh [--proxy-secret <SECRET>]"; exit 1 ;;
     esac
     shift
 done
-
-if [ -z "$CLIENT_ID" ]; then
-    echo "Error: --client-id argument is required."
-    echo "Usage: ./deploy_infra.sh --client-id <ID> [--proxy-secret <SECRET>]"
-    exit 1
-fi
 
 # NB: the Bicep appSettings array is authoritative, so omitting --proxy-secret
 # sets the Function App's PROXY_SHARED_SECRET to empty, disabling the proxy gate
@@ -36,6 +28,6 @@ az deployment sub create \
   --location "$LOCATION" \
   --template-file "$TEMPLATE_FILE" \
   --name "deploy-fs-judgepapers-$(date +%s)" \
-  --parameters authClientId="$CLIENT_ID" proxySharedSecret="$PROXY_SECRET"
+  --parameters proxySharedSecret="$PROXY_SECRET"
 
 echo "Infrastructure deployment complete."

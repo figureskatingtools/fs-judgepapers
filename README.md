@@ -2,13 +2,15 @@
 
 A web application for generating judging packets for figure skating competitions. Users upload PDF exports from Figure Skating Manager (FSM), and the system automatically splits, categorizes, and merges them into personalized PDF packets for each judge, referee, and technical official.
 
+> **The frontend now lives in the [figureskatingtools-site](https://github.com/figureskatingtools/figureskatingtools-site) repo** and is served at `https://figureskatingtools.com/judgepapers/`. This repo is backend-only (Python Functions + storage); the local `frontend/` directory is legacy and no longer built or deployed. See [PROXY-CONTRACT.md](PROXY-CONTRACT.md) for the router → Function App contract.
+
 ## Architecture
 
 | Layer | Technology |
 |---|---|
-| **Frontend** | TypeScript + Vite, served by Node.js proxy server |
+| **Frontend** | Hosted by the figureskatingtools-site router at `/judgepapers/` (not deployed from this repo) |
 | **Backend** | Python Azure Functions (HTTP triggers), pypdf & reportlab |
-| **Auth** | Microsoft Entra ID via Azure App Service Easy Auth (auto-redirect, silent SSO from figureskatingtools.com) |
+| **Auth** | Microsoft Entra ID Easy Auth on the site router; identity reaches this backend as a forwarded header (see [PROXY-CONTRACT.md](PROXY-CONTRACT.md)) |
 | **Storage** | Azure Blob Storage (PDFs) + Azure Table Storage (metadata) |
 | **Infrastructure** | Azure Bicep (subscription-scoped) |
 
@@ -20,7 +22,7 @@ A web application for generating judging packets for figure skating competitions
 
 ### Authentication
 
-Sign-in is Microsoft Entra ID enforced by App Service Easy Auth: unauthenticated visitors are redirected straight to the Entra sign-in page (`RedirectToLoginPage`). With an active session in the same tenant — e.g. after signing in on [figureskatingtools.com](https://figureskatingtools.com) — the redirect completes silently, so moving between the tools requires no extra sign-in. The Function App itself is anonymous; the Web App proxy authenticates calls to it with a forwarded identity header plus a shared secret (see `CLAUDE.md` for the full chain).
+Sign-in is Microsoft Entra ID enforced by App Service Easy Auth on [figureskatingtools.com](https://figureskatingtools.com), which hosts every tool under its own path. One session covers all of them. The Function App deployed from this repo is anonymous at the platform level; the site router authenticates calls to it with a forwarded identity header (`x-forwarded-user-email`) plus a shared secret (`x-proxy-secret`) — see [PROXY-CONTRACT.md](PROXY-CONTRACT.md).
 
 ## Features
 
@@ -50,12 +52,10 @@ Sign-in is Microsoft Entra ID enforced by App Service Easy Auth: unauthenticated
 ### 1. Infrastructure
 
 ```bash
-./deploy_infra.sh --client-id <ENTRA_CLIENT_ID>
+./deploy_infra.sh [--proxy-secret <SECRET>]
 ```
 
-Deploys Azure resources (Resource Group, Storage Account, Function App, Web App, Application Insights, RBAC) using Bicep.
-
-When a custom domain is configured (`customDomain` parameter, set per environment in `infra/parameters/*.bicepparam` and via the `CUSTOM_DOMAIN` GitHub environment variable), the deployment also creates the CNAME and `asuid` verification records in the shared `figureskatingtools.com` DNS zone (`rg-fs-dns`, owned by the landing-page deployment) and binds the domain to the Web App with a free App Service managed certificate.
+Deploys Azure resources (Resource Group, Storage Account, Function App, Application Insights, RBAC) using Bicep. No Web App, DNS or custom domain is created here — hosting and the domain belong to the figureskatingtools-site repo.
 
 ### 2. Backend
 
@@ -67,11 +67,7 @@ Packages and deploys the Python Azure Functions via ZIP deployment.
 
 ### 3. Frontend
 
-```bash
-./deploy_frontend.sh -g <resource-group>
-```
-
-Builds the Vite frontend, bundles with the Node.js server, and deploys to Azure Web App.
+Deployed from the figureskatingtools-site repo, not from here.
 
 ## Local Development
 
@@ -120,18 +116,15 @@ This starts the Azure Functions backend, the Vite dev server, and SWA CLI for lo
 ## Project Structure
 
 ```
-├── frontend/              # TypeScript + Vite web application
-│   ├── src/               # Frontend source code
-│   ├── server.js          # Node.js proxy server for production
-│   └── vite.config.ts     # Vite configuration
+├── frontend/              # LEGACY — moved to figureskatingtools-site; not built or deployed
 ├── infra/
 │   ├── main.bicep         # Infrastructure-as-Code (subscription-scoped)
-│   ├── modules/           # Bicep modules (storage, function, webapp, RBAC)
+│   ├── modules/           # Bicep modules (storage, function, RBAC)
 │   └── functions/         # Python Azure Functions (backend)
+├── PROXY-CONTRACT.md      # Router → Function App header contract
 ├── backend_build/         # Backend build artifacts
 ├── deploy_infra.sh        # Infrastructure deployment script
 ├── deploy_backend.sh      # Backend deployment script
-├── deploy_frontend.sh     # Frontend deployment script
 └── start_locally.sh       # Local development startup script
 ```
 
