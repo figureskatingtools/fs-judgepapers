@@ -28,7 +28,7 @@ MAX_UPLOAD_SIZE = 25 * 1024 * 1024
 # Automatic competition deletion: lifetime after creation, extension per
 # "extend" click, and the fixed migration date for rows created before this
 # feature existed (rows missing DeletionDate).
-DELETION_RETENTION_DAYS = 30
+DELETION_RETENTION_DAYS = 60
 DELETION_EXTENSION_DAYS = 7
 LEGACY_DELETION_DATE = "2026-06-12T00:00:00Z"
 AUTO_CLEANUP_ACTOR = "auto-cleanup"
