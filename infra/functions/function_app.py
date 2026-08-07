@@ -1246,7 +1246,10 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
             "competitionFiles": competition_files,
             "alerts": alerts,
             "categories": list(detected_category_codes),
-            "generatedFiles": generated_links
+            "generatedFiles": generated_links,
+            # The site UI has no competition list anymore; retention (auto-delete
+            # date + extend) is surfaced in the detail view instead.
+            "deletionDate": entity.get("DeletionDate")
         }), mimetype="application/json")
     except Exception as e:
         logging.error(f"Error getting details: {e}")
