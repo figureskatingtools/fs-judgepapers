@@ -166,6 +166,34 @@ def get_blob_service_client():
         logging.error(f"Failed to create blob client: {e}")
         return None
 
+def get_platform_container_client():
+    """
+    Container client for the platform's shared competition file pool
+    (competition-data/<platform-guid>/uploads/...), hosted in the site repo's
+    storage account. Returns None when PLATFORM_STORAGE_ACCOUNT is unset, which
+    cleanly turns the pool-import feature off.
+
+    No connection string for that account exists, deliberately: access rests
+    on the Storage Blob Data *Reader* grant to this Function App's system
+    identity (site repo's shared-data-access.bicep), so the app can never
+    write there. DefaultAzureCredential resolves to that managed identity in
+    production; its dev-credential fallbacks only matter locally, where the
+    developer's own RBAC decides.
+    """
+    account_name = os.environ.get("PLATFORM_STORAGE_ACCOUNT")
+    if not account_name:
+        return None
+    # Creation failures propagate: the import route maps them to 502
+    # "platform_unavailable", which is distinct from the deliberate
+    # feature-off None (503 "platform_not_configured").
+    container_name = os.environ.get("PLATFORM_DATA_CONTAINER") or "competition-data"
+    client = BlobServiceClient(
+        account_url=f"https://{account_name}.blob.core.windows.net",
+        credential=DefaultAzureCredential(),
+    )
+    return client.get_container_client(container_name)
+
+
 def get_table_client(table_name="generatedpapers"):
     """Helper to connect to Table Storage"""
     try:
@@ -1482,6 +1510,101 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(json.dumps({"filename": filename, "status": "uploaded"}), mimetype="application/json")
     except Exception as e:
         logging.error(f"Error uploading file: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+@app.route(route="import_platform_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Copy a file from the platform's shared competition file pool into this
+    tool's competition folder. Query: competition (this tool's competition id)
+    and name (pool blob file name). The pool path is composed server-side from
+    the competition's bound PlatformId, so a client can never point this at
+    another competition's files.
+    """
+    logging.info('Importing file from the platform file pool...')
+
+    email = get_user_email_from_header(req)
+    if not email:
+        return func.HttpResponse("Unauthorized", status_code=401)
+
+    competition = req.params.get('competition')
+    name = req.params.get('name')
+
+    if not competition or not name:
+        return func.HttpResponse("Missing competition or name", status_code=400)
+
+    # Sanitize: only the basename is ever used, both for the pool lookup and
+    # for the destination blob path.
+    filename = os.path.basename(name)
+
+    if not filename.lower().endswith('.pdf'):
+        return func.HttpResponse("Only PDF files are allowed", status_code=400)
+
+    entity = get_competition_entity(competition)
+    if not entity:
+        return func.HttpResponse("Competition not found", status_code=404)
+
+    platform_id = entity.get("PlatformId")
+    if not platform_id:
+        return func.HttpResponse(
+            "not_bound: this competition is not linked to a platform competition",
+            status_code=409)
+    # The binding originates from a client body (resolve_competition), so pin it
+    # to a UUID before splicing it into the pool blob path.
+    if not re.fullmatch(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", platform_id):
+        logging.warning(f"Rejecting non-UUID PlatformId {platform_id!r} on competition {competition}")
+        return func.HttpResponse(
+            "not_bound: this competition's platform link is invalid",
+            status_code=409)
+
+    try:
+        pool_container = get_platform_container_client()
+    except Exception as e:
+        logging.error(f"Platform pool client creation failed: {e}")
+        return func.HttpResponse(
+            "platform_unavailable: could not read the competition file pool",
+            status_code=502)
+    if pool_container is None:
+        return func.HttpResponse(
+            "platform_not_configured: the platform file pool is not configured",
+            status_code=503)
+
+    pool_path = f"{platform_id}/uploads/{filename}"
+
+    try:
+        source_blob = pool_container.get_blob_client(pool_path)
+        properties = source_blob.get_blob_properties()
+        if properties.size and properties.size > MAX_UPLOAD_SIZE:
+            return func.HttpResponse(f"File too large. Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.", status_code=413)
+        file_content = source_blob.download_blob().readall()
+    except ResourceNotFoundError:
+        return func.HttpResponse("File not found in the competition file pool", status_code=404)
+    except Exception as e:
+        logging.error(f"Error reading platform pool blob {pool_path}: {e}")
+        return func.HttpResponse(
+            "platform_unavailable: could not read the competition file pool",
+            status_code=502)
+
+    if len(file_content) > MAX_UPLOAD_SIZE:
+        return func.HttpResponse(f"File too large. Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.", status_code=413)
+
+    try:
+        folder_path = entity.get("FolderPath", entity["RowKey"])
+
+        blob_service_client = get_blob_service_client()
+        if not blob_service_client: return func.HttpResponse("Config Error", status_code=500)
+
+        container = blob_service_client.get_container_client("fs-judgepapers")
+
+        blob_path = f"{folder_path}/{filename}"
+
+        container.upload_blob(blob_path, file_content, overwrite=True)
+
+        _bump_competition_counters(competition, uploaded_delta=1)
+
+        return func.HttpResponse(json.dumps({"filename": filename, "status": "uploaded"}), mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Error importing file: {e}")
         return func.HttpResponse("Internal server error", status_code=500)
 
 @app.route(route="delete_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["DELETE", "POST"])

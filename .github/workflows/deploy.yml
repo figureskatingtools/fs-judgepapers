@@ -68,6 +68,8 @@ jobs:
             --parameters \
               resourceGroupName="${{ vars.RESOURCE_GROUP_NAME }}" \
               proxySharedSecret="${{ secrets.PROXY_SHARED_SECRET }}" \
+              platformStorageAccountName="${{ vars.PLATFORM_STORAGE_ACCOUNT }}" \
+              platformDataContainerName="${{ vars.PLATFORM_DATA_CONTAINER || 'competition-data' }}" \
             --query 'properties.outputs' \
             -o json)
 

@@ -11,6 +11,12 @@ param deploymentContainerUrl string
 @secure()
 param proxySharedSecret string = ''
 
+// Platform (site repo) storage account holding the shared competition file pool
+// this app reads with its managed identity. Empty = pool import stays off (see
+// function_app.py:get_platform_container_client).
+param platformStorageAccountName string = ''
+param platformDataContainerName string = 'competition-data'
+
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: appServicePlanName
   location: location
@@ -67,6 +73,14 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'PROXY_SHARED_SECRET'
           value: proxySharedSecret
+        }
+        {
+          name: 'PLATFORM_STORAGE_ACCOUNT'
+          value: platformStorageAccountName
+        }
+        {
+          name: 'PLATFORM_DATA_CONTAINER'
+          value: platformDataContainerName
         }
       ]
     }
