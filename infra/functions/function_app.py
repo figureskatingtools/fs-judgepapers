@@ -181,16 +181,15 @@ def get_platform_container_client():
     account_name = os.environ.get("PLATFORM_STORAGE_ACCOUNT")
     if not account_name:
         return None
+    # Creation failures propagate: the import route maps them to 502
+    # "platform_unavailable", which is distinct from the deliberate
+    # feature-off None (503 "platform_not_configured").
     container_name = os.environ.get("PLATFORM_DATA_CONTAINER") or "competition-data"
-    try:
-        client = BlobServiceClient(
-            account_url=f"https://{account_name}.blob.core.windows.net",
-            credential=DefaultAzureCredential(),
-        )
-        return client.get_container_client(container_name)
-    except Exception as e:
-        logging.error(f"Failed to create platform blob client: {e}")
-        return None
+    client = BlobServiceClient(
+        account_url=f"https://{account_name}.blob.core.windows.net",
+        credential=DefaultAzureCredential(),
+    )
+    return client.get_container_client(container_name)
 
 
 def get_table_client(table_name="generatedpapers"):
@@ -1549,7 +1548,13 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
             "not_bound: this competition is not linked to a platform competition",
             status_code=409)
 
-    pool_container = get_platform_container_client()
+    try:
+        pool_container = get_platform_container_client()
+    except Exception as e:
+        logging.error(f"Platform pool client creation failed: {e}")
+        return func.HttpResponse(
+            "platform_unavailable: could not read the competition file pool",
+            status_code=502)
     if pool_container is None:
         return func.HttpResponse(
             "platform_not_configured: the platform file pool is not configured",
