@@ -173,10 +173,12 @@ def get_platform_container_client():
     storage account. Returns None when PLATFORM_STORAGE_ACCOUNT is unset, which
     cleanly turns the pool-import feature off.
 
-    Managed identity only, deliberately: this Function App's system identity is
-    the principal granted Storage Blob Data Reader on the platform account
-    (site repo's shared-data-access.bicep). There is no connection string for
-    that account and this app must never be able to write to it.
+    No connection string for that account exists, deliberately: access rests
+    on the Storage Blob Data *Reader* grant to this Function App's system
+    identity (site repo's shared-data-access.bicep), so the app can never
+    write there. DefaultAzureCredential resolves to that managed identity in
+    production; its dev-credential fallbacks only matter locally, where the
+    developer's own RBAC decides.
     """
     account_name = os.environ.get("PLATFORM_STORAGE_ACCOUNT")
     if not account_name:
@@ -1546,6 +1548,13 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
     if not platform_id:
         return func.HttpResponse(
             "not_bound: this competition is not linked to a platform competition",
+            status_code=409)
+    # The binding originates from a client body (resolve_competition), so pin it
+    # to a UUID before splicing it into the pool blob path.
+    if not re.fullmatch(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", platform_id):
+        logging.warning(f"Rejecting non-UUID PlatformId {platform_id!r} on competition {competition}")
+        return func.HttpResponse(
+            "not_bound: this competition's platform link is invalid",
             status_code=409)
 
     try:
