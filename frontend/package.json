@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@figureskatingtools/shared-ui": "^2.3.0"
+    "@figureskatingtools/shared-ui": "^3.0.0"
   },
   "overrides": {
     "tmp": "^0.2.7",
@@ -17,8 +17,8 @@
   },
   "devDependencies": {
     "@azure/static-web-apps-cli": "^2.0.10",
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.2.0",
     "typescript": "^7.0.2",
-    "vite": "^8.1.5"
+    "vite": "^8.2.1"
   }
 }
