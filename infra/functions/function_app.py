@@ -285,6 +285,16 @@ def _refresh_from_pool(entity, container, folder_path):
                     name = blob.name[len(pool_prefix):]
                     if not name or '/' in name or name not in own:
                         continue
+                    # The listing already carries the size, so an oversized blob
+                    # is dropped here for free. Leaving it to _copy_pool_blob's
+                    # check would mean pulling the whole thing into the
+                    # function's memory only to reject it — and unlike the import
+                    # route, this path has no earlier size gate.
+                    if blob.size and blob.size > MAX_UPLOAD_SIZE:
+                        logging.warning(
+                            f"Pool refresh: {blob.name} exceeds the "
+                            f"{MAX_UPLOAD_SIZE // (1024*1024)} MB limit, skipping")
+                        continue
                     modified = _as_utc(blob.last_modified)
                     if modified is None:
                         continue

@@ -224,9 +224,12 @@ def split_pdf(pdf_path):
         text = page.extract_text(extraction_mode="layout")
         lines = text.split('\n')
         
-        # Check if this page is for a withdrawn competitor
-        starting_num, competitor_name = extract_starting_number(text)
-        if starting_num == 'WD' or is_withdrawn_page(text):
+        # Check if this page is for a withdrawn competitor. is_withdrawn_page is
+        # the whole gate: testing `starting_num == 'WD'` alongside it would
+        # short-circuit past that function's legend guard and drop a summary page
+        # whose first two-column line is the start list's own 'WD  Withdrawn'.
+        _, competitor_name = extract_starting_number(text)
+        if is_withdrawn_page(text):
             name = withdrawn_name_from_page(text) or competitor_name
             if name and name not in withdrawn_competitors:
                 withdrawn_competitors.append(name)
