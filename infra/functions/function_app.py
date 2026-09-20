@@ -888,18 +888,21 @@ def _sync_competition_name(comp_table, blob_service_client, entity, name):
     entity["Name"] = new_name
 
     # metadata.json carries the display name too; keep it in step, best-effort.
+    # Read it strictly here rather than via `_read_competition_metadata`: that
+    # helper maps a missing/unreadable/malformed file to {}, and rewriting
+    # {} + name would wipe id, createdBy, language and judgingMethodOverrides.
+    # Any read problem means: leave the blob alone, the table is authoritative.
     try:
         folder_path = entity.get("FolderPath", entity["RowKey"])
         container = blob_service_client.get_container_client("fs-judgepapers")
-        meta = _read_competition_metadata(container, folder_path)
+        metadata_blob = container.get_blob_client(f"{folder_path}/metadata.json")
+        meta = json.loads(metadata_blob.download_blob().readall())
+        if not isinstance(meta, dict):
+            raise ValueError("metadata.json is not a JSON object")
         meta["name"] = new_name
-        container.upload_blob(
-            f"{folder_path}/metadata.json",
-            json.dumps(meta, indent=4),
-            overwrite=True
-        )
+        metadata_blob.upload_blob(json.dumps(meta, indent=4), overwrite=True)
     except Exception as e:
-        logging.warning(f"Could not update metadata.json name for {entity['RowKey']}: {e}")
+        logging.warning(f"Left metadata.json of {entity['RowKey']} untouched after rename: {e}")
 
     logging.info(f"Synced competition {entity['RowKey']} name '{old_name}' -> '{new_name}'")
     return new_name
