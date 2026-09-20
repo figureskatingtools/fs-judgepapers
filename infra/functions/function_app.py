@@ -862,15 +862,63 @@ def adopt_competition_by_name(comp_table, platform_id, name):
     return entity
 
 
+def _sync_competition_name(comp_table, blob_service_client, entity, name):
+    """
+    Bring a platform-bound record's display Name in line with the platform
+    name after a rename on the site. Table write first (authoritative — the new
+    name is only reported once it is stored); the metadata.json rewrite is
+    best-effort. FolderPath is never touched: blob paths and generated-paper
+    URLs hang off it. Returns the name callers should report.
+    """
+    new_name = sanitize_name(str(name or ""))
+    old_name = entity.get("Name", entity["RowKey"])
+    if not new_name or new_name == old_name:
+        return old_name
+
+    try:
+        comp_table.update_entity({
+            "PartitionKey": "GLOBAL",
+            "RowKey": entity["RowKey"],
+            "Name": new_name
+        }, mode=UpdateMode.MERGE)
+    except Exception as e:
+        logging.warning(f"Could not rename competition {entity['RowKey']} to '{new_name}': {e}")
+        return old_name
+
+    entity["Name"] = new_name
+
+    # metadata.json carries the display name too; keep it in step, best-effort.
+    # Read it strictly here rather than via `_read_competition_metadata`: that
+    # helper maps a missing/unreadable/malformed file to {}, and rewriting
+    # {} + name would wipe id, createdBy, language and judgingMethodOverrides.
+    # Any read problem means: leave the blob alone, the table is authoritative.
+    try:
+        folder_path = entity.get("FolderPath", entity["RowKey"])
+        container = blob_service_client.get_container_client("fs-judgepapers")
+        metadata_blob = container.get_blob_client(f"{folder_path}/metadata.json")
+        meta = json.loads(metadata_blob.download_blob().readall())
+        if not isinstance(meta, dict):
+            raise ValueError("metadata.json is not a JSON object")
+        meta["name"] = new_name
+        metadata_blob.upload_blob(json.dumps(meta, indent=4), overwrite=True)
+    except Exception as e:
+        logging.warning(f"Left metadata.json of {entity['RowKey']} untouched after rename: {e}")
+
+    logging.info(f"Synced competition {entity['RowKey']} name '{old_name}' -> '{new_name}'")
+    return new_name
+
+
 def resolve_competition_record(comp_table, blob_service_client, platform_id, name, email):
     """
-    Core of POST /resolve_competition: platform-id lookup -> name adoption ->
+    Core of POST /resolve_competition: platform-id lookup (syncing the stored
+    Name when the platform competition has been renamed) -> name adoption ->
     create. Pure with respect to HTTP (clients are injected) so it can be driven
     by fakes. Returns the response payload dict {id, name, created}.
     """
     entity = find_competition_by_platform_id(comp_table, platform_id)
     if entity is not None:
-        return {"id": entity["RowKey"], "name": entity.get("Name", entity["RowKey"]), "created": False}
+        synced = _sync_competition_name(comp_table, blob_service_client, entity, name)
+        return {"id": entity["RowKey"], "name": synced, "created": False}
 
     entity = adopt_competition_by_name(comp_table, platform_id, name)
     if entity is not None:
@@ -887,8 +935,9 @@ def resolve_competition_record(comp_table, blob_service_client, platform_id, nam
 def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     """
     Bind the site's active platform competition to this tool's competition
-    record: look it up by PlatformId, else adopt a matching unbound record,
-    else create one. Body {platformId, name} -> {id, name, created}.
+    record: look it up by PlatformId (following platform renames), else adopt a
+    matching unbound record, else create one. Body {platformId, name} ->
+    {id, name, created}.
     """
     logging.info('Resolving platform competition...')
 
