@@ -1,5 +1,13 @@
 name: Deploy to Azure
 
+# Runner image is pinned on purpose. The ubuntu-latest label moves from Ubuntu
+# 24.04 to 26.04 between 2026-10-19 and 2026-11-19
+# (https://github.com/actions/runner-images/issues/14748), so an explicit label
+# keeps a -latest flip from changing the deploy OS under us mid-rollout.
+# Bump it deliberately: change every runs-on in this file together, dispatch
+# the workflow against the test environment first, then promote. Never set it
+# back to ubuntu-latest. Rollback label: ubuntu-24.04.
+
 on:
   # Push to main auto-deploys prod. test is deployed only via manual dispatch
   # (run the workflow from the branch whose code you want to deploy).
@@ -22,7 +30,7 @@ permissions:
 jobs:
   set-environment:
     name: Determine Environment
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       env_name: ${{ steps.set-env.outputs.env_name }}
     steps:
@@ -38,7 +46,7 @@ jobs:
   deploy-infra:
     name: Deploy Infrastructure
     needs: set-environment
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: ${{ needs.set-environment.outputs.env_name }}
     outputs:
       function_app_name: ${{ steps.deploy.outputs.functionAppName }}
@@ -97,7 +105,7 @@ jobs:
   deploy-backend:
     name: Deploy Backend (Functions)
     needs: [set-environment, deploy-infra]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: ${{ needs.set-environment.outputs.env_name }}
     steps:
       - name: Checkout code
@@ -118,7 +126,7 @@ jobs:
           rm -f test_*.py
 
           mkdir -p .python_packages/lib/site-packages
-          pip install -r requirements.txt --target .python_packages/lib/site-packages
+          pip install -r requirements.txt --only-binary=:all: --target .python_packages/lib/site-packages
 
           zip -r "$GITHUB_WORKSPACE/backend.zip" .
 
