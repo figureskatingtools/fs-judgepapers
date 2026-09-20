@@ -7,6 +7,9 @@ The 'categories' Azure Table holds one row per competition category with:
   - DisplayName: Human-readable English name (e.g. "A-Silmut, Girls")
   - DisplayNameFi: Human-readable Finnish name (e.g. "A-Silmut, Tytöt")
   - JudgingMethod: "ISU" or "MUPI"
+
+The table value is the *default*; synchronized-skating categories can be
+overridden per competition (see effective_judging_method).
 """
 
 import logging
@@ -72,6 +75,47 @@ def match_category(filename, categories):
         if filename.startswith(cat["abbreviation"]):
             return cat
     return None
+
+
+SYNCHRONIZED_SKATING = "synchronized skating"
+JUDGING_METHODS = ("ISU", "MUPI")
+
+
+def is_synchronized_skating(competition_type):
+    """
+    True if the category's competition type (the table PartitionKey) is
+    synchronized skating. Compared case-insensitively: live rows use both
+    'Synchronized skating' and 'Synchronized Skating'.
+    """
+    return (competition_type or "").strip().casefold() == SYNCHRONIZED_SKATING
+
+
+def sanitize_judging_method_overrides(raw):
+    """
+    Normalises the metadata.json 'judgingMethodOverrides' value into
+    {abbreviation: "ISU"|"MUPI"}. Anything else (non-dict input, non-string
+    keys, unknown methods) is dropped so a hand-edited metadata.json can
+    never break a read.
+    """
+    if not isinstance(raw, dict):
+        return {}
+
+    clean = {}
+    for key, value in raw.items():
+        if isinstance(key, str) and key and value in JUDGING_METHODS:
+            clean[key] = value
+    return clean
+
+
+def effective_judging_method(abbreviation, competition_type, default_method, overrides):
+    """
+    The judging method to apply for a category in a given competition: the
+    table default, unless this is a synchronized-skating category the
+    competition overrides. Overrides for other competition types are ignored.
+    """
+    if overrides and is_synchronized_skating(competition_type):
+        return overrides.get(abbreviation, default_method)
+    return default_method
 
 
 def invalidate_cache():

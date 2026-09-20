@@ -17,7 +17,15 @@ from azure.data.tables import TableClient, UpdateMode
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from processor import process_judging_papers
-from categories import load_categories, match_category, parse_filename_generic
+from categories import (
+    load_categories,
+    match_category,
+    parse_filename_generic,
+    JUDGING_METHODS,
+    is_synchronized_skating,
+    sanitize_judging_method_overrides,
+    effective_judging_method,
+)
 from competition_schedule import parse_competition_schedule, get_schedule_start_time
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
@@ -1109,6 +1117,24 @@ def parse_competition_file(filename: str, categories=None):
     except Exception:
         return None
 
+
+def _read_competition_metadata(container, folder_path):
+    """
+    Reads {folder_path}/metadata.json and returns it as a dict.
+
+    Best-effort: a missing, unreadable or malformed file yields {} so callers
+    fall back to defaults rather than failing the whole request.
+    """
+    try:
+        metadata_blob = container.get_blob_client(f"{folder_path}/metadata.json")
+        if not metadata_blob.exists():
+            return {}
+        meta = json.loads(metadata_blob.download_blob().readall())
+        return meta if isinstance(meta, dict) else {}
+    except Exception as e:
+        logging.warning(f"Could not read metadata.json for {folder_path}: {e}")
+        return {}
+
 @app.route(route="get_categories", auth_level=func.AuthLevel.ANONYMOUS)
 def get_categories(req: func.HttpRequest) -> func.HttpResponse:
     """Returns all competition categories from the categories table."""
@@ -1155,15 +1181,9 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
         categories = _get_categories()
 
         # Load competition settings from metadata.json
-        competition_language = 'fi'  # Default to Finnish
-        try:
-            metadata_blob = container.get_blob_client(f"{folder_path}/metadata.json")
-            if metadata_blob.exists():
-                meta_stream = metadata_blob.download_blob().readall()
-                meta = json.loads(meta_stream)
-                competition_language = meta.get('language', 'fi')
-        except Exception:
-            pass
+        meta = _read_competition_metadata(container, folder_path)
+        competition_language = meta.get('language', 'fi')  # Default to Finnish
+        judging_overrides = sanitize_judging_method_overrides(meta.get('judgingMethodOverrides'))
 
         # FS Manager re-exports overwrite the pool copy under the same name;
         # pull any newer pool version in before listing what we hold.
@@ -1204,6 +1224,19 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
                 parsed['lastModified'] = _iso_utc(blob.last_modified)
                 parsed['uploadedUtc'] = _meta(blob.metadata, 'poolUploadedUtc') or parsed['lastModified']
                 parsed['poolSource'] = _meta(blob.metadata, 'poolSource')
+
+                # judgingMethod is reported as the *effective* value so the UI
+                # validation and the MUPI badge need no override rules of their
+                # own; the table default is kept alongside for the switch.
+                parsed['defaultJudgingMethod'] = parsed.get('judgingMethod', '')
+                parsed['judgingMethodOverridable'] = is_synchronized_skating(parsed.get('type'))
+                parsed['judgingMethod'] = effective_judging_method(
+                    parsed.get('categoryCode'),
+                    parsed.get('type'),
+                    parsed['defaultJudgingMethod'],
+                    judging_overrides,
+                )
+
                 files_data.append(parsed)
                 cat = parsed['category']
                 seg = parsed['segment']
@@ -1451,6 +1484,9 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
             "type": comp_type_display,
             "date": comp_date_display,
             "language": competition_language,
+            # The UI sends this map back in full on every save, so it needs the
+            # stored one even for categories it cannot currently see.
+            "judgingMethodOverrides": judging_overrides,
             "files": files_data,
             "structure": structure,
             "competitionFiles": competition_files,
@@ -1470,7 +1506,12 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="save_competition_settings", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
-    """Save competition settings (e.g. language) to metadata.json."""
+    """
+    Save competition settings (e.g. language, judgingMethodOverrides) to
+    metadata.json. Settings are merged per key; a value that is itself a map
+    (judgingMethodOverrides) is replaced wholesale, so the client must send it
+    in full.
+    """
     logging.info('Saving competition settings...')
 
     email = get_user_email_from_header(req)
@@ -1487,6 +1528,17 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
     if not comp_id:
         return func.HttpResponse("Missing id parameter", status_code=400)
 
+    # Reject a malformed override map outright instead of silently sanitizing
+    # it away: the client would otherwise believe its choice was stored.
+    if 'judgingMethodOverrides' in settings:
+        overrides = settings['judgingMethodOverrides']
+        if not isinstance(overrides, dict) or sanitize_judging_method_overrides(overrides) != overrides:
+            return func.HttpResponse(
+                "judgingMethodOverrides must be an object mapping category abbreviation to "
+                f"one of {', '.join(JUDGING_METHODS)}",
+                status_code=400
+            )
+
     try:
         entity = get_competition_entity(comp_id)
         if not entity:
@@ -1499,16 +1551,9 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse("Storage configuration error", status_code=500)
 
         container = blob_service_client.get_container_client("fs-judgepapers")
-        metadata_blob = container.get_blob_client(f"{folder_path}/metadata.json")
 
         # Read existing metadata
-        existing_meta = {}
-        try:
-            if metadata_blob.exists():
-                stream = metadata_blob.download_blob().readall()
-                existing_meta = json.loads(stream)
-        except Exception:
-            pass
+        existing_meta = _read_competition_metadata(container, folder_path)
 
         # Merge new settings into existing metadata
         for key, value in settings.items():
@@ -1604,6 +1649,13 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
 
         if download_count == 0:
              return func.HttpResponse(f"No files found in folder '{working_folder}'", status_code=404)
+
+        # metadata.json is the only source of truth for the overrides; a value
+        # sent by the client in options is overwritten, never trusted.
+        meta = _read_competition_metadata(container_client, working_folder)
+        options['judgingMethodOverrides'] = sanitize_judging_method_overrides(
+            meta.get('judgingMethodOverrides')
+        )
 
         # Run the processor
         logging.info("Running processor...")

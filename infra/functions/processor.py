@@ -9,14 +9,14 @@ try:
     from .split_judges_sheets import split_pdf, filter_withdrawn_pages
     from .create_cover_pages import create_cover_pdf, create_segment_cover_pdf, create_start_list_with_strikethrough, extract_title_from_pdf, extract_segment_name_from_pdf
     from .combine_judging_papers import get_date_from_start_list, get_first_start_time_from_start_list, get_panel_info, merge_pdfs, slugify
-    from .categories import load_categories, match_category, parse_filename_generic
+    from .categories import load_categories, match_category, parse_filename_generic, effective_judging_method
     from .competition_schedule import parse_competition_schedule, get_schedule_start_time
 except ImportError:
     # Fallback for local testing if not running as package
     from split_judges_sheets import split_pdf, filter_withdrawn_pages
     from create_cover_pages import create_cover_pdf, create_segment_cover_pdf, create_start_list_with_strikethrough, extract_title_from_pdf, extract_segment_name_from_pdf
     from combine_judging_papers import get_date_from_start_list, get_first_start_time_from_start_list, get_panel_info, merge_pdfs, slugify
-    from categories import load_categories, match_category, parse_filename_generic
+    from categories import load_categories, match_category, parse_filename_generic, effective_judging_method
     from competition_schedule import parse_competition_schedule, get_schedule_start_time
 
 
@@ -110,7 +110,11 @@ def process_judging_papers(source_dir, output_dir, options=None):
     
     # Language setting: 'fi' (Finnish, default) or 'en' (English)
     language = options.get('language', 'fi')
-    
+
+    # Per-competition ISU/MUPI choices for synchronized-skating categories.
+    # Statistics only — the PDF pipeline never branches on the judging method.
+    judging_overrides = options.get('judgingMethodOverrides') or {}
+
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -562,7 +566,8 @@ def process_judging_papers(source_dir, output_dir, options=None):
     try:
         stats = _compute_statistics(
             categories, schedule_entries, person_tasks, prefix_withdrawn,
-            language, total_pages, withdrawn_pages_removed
+            language, total_pages, withdrawn_pages_removed,
+            judging_method_overrides=judging_overrides
         )
     except Exception as e:
         print(f"  Warning: Failed to compute statistics: {e}")
@@ -572,7 +577,8 @@ def process_judging_papers(source_dir, output_dir, options=None):
 
 
 def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withdrawn,
-                        language, total_pages, withdrawn_pages_removed=0):
+                        language, total_pages, withdrawn_pages_removed=0,
+                        judging_method_overrides=None):
     """
     Build a usage-statistics dict from the structures accumulated during
     process_judging_papers. Stored on the competitions table row (which
@@ -619,7 +625,9 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
             else:
                 category_names.add(matched.get("displayNameFi", matched["displayName"]))
             competition_types.add(matched["competitionType"])
-            judging_methods.add(matched["judgingMethod"])
+            judging_methods.add(effective_judging_method(
+                matched["abbreviation"], matched["competitionType"],
+                matched["judgingMethod"], judging_method_overrides))
         _, segment = parse_prefix(prefix, categories, language=language)
         if segment and segment != "Category General":
             segment_types.add(segment)

@@ -28,7 +28,7 @@ Sign-in is Microsoft Entra ID enforced by App Service Easy Auth on [figureskatin
 
 - **PDF Processing Pipeline** — Split → Categorize → Cover pages → Merge → ZIP
 - **Multi-language UI** — Finnish (default) and English
-- **Category Management** — Categories loaded from Azure Table Storage (IJS/MUPI judging methods)
+- **Category Management** — Categories loaded from Azure Table Storage (ISU/MUPI judging methods); synchronized-skating categories can be switched between ISU and MUPI per competition
 - **Competition Workflow** — List, create, upload PDFs, generate and download judging packets
 - **Serverless & Secure** — Azure Functions with Managed Identity for storage access
 
