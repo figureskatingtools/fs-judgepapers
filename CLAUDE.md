@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Web app that generates judging packets for figure skating competitions. Users upload PDF exports from Figure Skating Manager (FSM); the backend splits, categorizes, and merges them into per-judge/referee/official PDF packets. UI is bilingual (Finnish default, English).
 
-**This repo is backend-only.** The frontend was moved to the `figureskatingtools-site` repo, which serves it at `https://figureskatingtools.com/judgepapers/` and proxies `/judgepapers/api/*` here. The local `frontend/` directory is legacy: it is no longer built, deployed, or referenced by CI, and will be deleted at teardown. `PROXY-CONTRACT.md` is the authoritative description of the router → Function App contract.
+**This repo is backend-only.** The frontend was moved to the `figureskatingtools-site` repo, which serves it at `https://figureskatingtools.com/judgepapers/` and proxies `/judgepapers/api/*` here. `PROXY-CONTRACT.md` is the authoritative description of the router → Function App contract.
 
 ## Commands
 
@@ -25,13 +25,13 @@ curl -s http://localhost:7071/api/check_user_permission \
 ./deploy_backend.sh -g <resource-group>       # Functions ZIP deploy
 ```
 
-There are no tests and no linter configured. To drive the backend from a UI, run the frontend from the `figureskatingtools-site` repo and point its judgepapers function-app URL at `http://localhost:7071`. `start_locally.sh`, `deploy_frontend.sh` and `create_auth_app.sh` are leftovers of the old per-tool Web App and no longer reflect how this tool is hosted.
+There are no tests and no linter configured. To drive the backend from a UI, run the frontend from the `figureskatingtools-site` repo and point its judgepapers function-app URL at `http://localhost:7071`.
 
 ## Architecture
 
 Two pieces deployed from here, plus a frontend that lives elsewhere:
 
-1. **Frontend** — *no longer in this repo.* The `figureskatingtools-site` repo hosts a single App Service that serves every tool's UI (`/judgepapers/`, `/scoremodifier/`, …), owns Easy Auth and the `figureskatingtools.com` domain, and proxies `/judgepapers/api/*` to the Function App deployed here. The legacy `frontend/` directory is dead code kept only until teardown; do not edit it, and do not restore it to CI.
+1. **Frontend** — *no longer in this repo.* The `figureskatingtools-site` repo hosts a single App Service that serves every tool's UI (`/judgepapers/`, `/scoremodifier/`, …), owns Easy Auth and the `figureskatingtools.com` domain, and proxies `/judgepapers/api/*` to the Function App deployed here.
 
 2. **Backend** (`infra/functions/`) — Python Azure Functions, all HTTP-triggered, defined in `function_app.py`. The PDF pipeline lives in plain modules called by the `generate_judging_papers` endpoint:
    - `processor.py` — orchestrator: parse CompetitionSchedule → extract segment names → split judge sheets → generate cover pages → merge per-person packets → ZIP. Runs on local temp dirs after downloading blobs.
