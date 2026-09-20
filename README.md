@@ -2,7 +2,7 @@
 
 A web application for generating judging packets for figure skating competitions. Users upload PDF exports from Figure Skating Manager (FSM), and the system automatically splits, categorizes, and merges them into personalized PDF packets for each judge, referee, and technical official.
 
-> **The frontend now lives in the [figureskatingtools-site](https://github.com/figureskatingtools/figureskatingtools-site) repo** and is served at `https://figureskatingtools.com/judgepapers/`. This repo is backend-only (Python Functions + storage); the local `frontend/` directory is legacy and no longer built or deployed. See [PROXY-CONTRACT.md](PROXY-CONTRACT.md) for the router → Function App contract.
+> **The frontend now lives in the [figureskatingtools-site](https://github.com/figureskatingtools/figureskatingtools-site) repo** and is served at `https://figureskatingtools.com/judgepapers/`. This repo is backend-only (Python Functions + storage). See [PROXY-CONTRACT.md](PROXY-CONTRACT.md) for the router → Function App contract.
 
 ## Architecture
 
@@ -102,16 +102,6 @@ Deployed from the figureskatingtools-site repo, not from here.
 
 ## Local Development
 
-### Quick Start
-
-```bash
-./start_locally.sh
-```
-
-This starts the Azure Functions backend, the Vite dev server, and SWA CLI for local auth emulation.
-
-### Manual Setup
-
 1. **Configure local settings** — Create `infra/functions/local.settings.json`:
     ```json
     {
@@ -132,31 +122,20 @@ This starts the Azure Functions backend, the Vite dev server, and SWA CLI for lo
     func start
     ```
 
-3. **Frontend:**
-    ```bash
-    cd frontend
-    NODE_AUTH_TOKEN=$(gh auth token) npm install   # token needs read:packages scope
-    npm run dev
-    ```
-
-    > The frontend consumes `@figureskatingtools/shared-ui` (the shared site
-    > navigation) from GitHub Packages, which requires an authenticated token
-    > with `read:packages` even for installs. Grant the scope once with
-    > `gh auth refresh -s read:packages`, or use a classic PAT.
+3. **UI:** run the frontend from the
+   [figureskatingtools-site](https://github.com/figureskatingtools/figureskatingtools-site)
+   repo and point its judgepapers function-app URL at `http://localhost:7071`.
 
 ## Project Structure
 
 ```
-├── frontend/              # LEGACY — moved to figureskatingtools-site; not built or deployed
 ├── infra/
 │   ├── main.bicep         # Infrastructure-as-Code (subscription-scoped)
 │   ├── modules/           # Bicep modules (storage, function, RBAC)
 │   └── functions/         # Python Azure Functions (backend)
 ├── PROXY-CONTRACT.md      # Router → Function App header contract
-├── backend_build/         # Backend build artifacts
 ├── deploy_infra.sh        # Infrastructure deployment script
-├── deploy_backend.sh      # Backend deployment script
-└── start_locally.sh       # Local development startup script
+└── deploy_backend.sh      # Backend deployment script
 ```
 
 ## License
