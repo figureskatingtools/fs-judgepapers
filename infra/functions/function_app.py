@@ -1528,6 +1528,11 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
     if not comp_id:
         return func.HttpResponse("Missing id parameter", status_code=400)
 
+    # `settings` comes straight from the body: a null or non-object value would
+    # otherwise blow up the `in` check below and the merge with a 500.
+    if not isinstance(settings, dict):
+        return func.HttpResponse("settings must be an object", status_code=400)
+
     # Reject a malformed override map outright instead of silently sanitizing
     # it away: the client would otherwise believe its choice was stored.
     if 'judgingMethodOverrides' in settings:
@@ -1591,6 +1596,11 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
         options = req_body.get('options', {})
     except ValueError:
         return func.HttpResponse("Invalid JSON body", status_code=400)
+
+    # `options` is mutated below (judgingMethodOverrides) and read by the
+    # processor with .get(); a null or non-object body value would 500.
+    if not isinstance(options, dict):
+        options = {}
 
     if not comp_id:
         return func.HttpResponse("Please pass a workingFolder in the request body", status_code=400)
