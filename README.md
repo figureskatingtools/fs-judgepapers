@@ -28,9 +28,40 @@ Sign-in is Microsoft Entra ID enforced by App Service Easy Auth on [figureskatin
 
 - **PDF Processing Pipeline** — Split → Categorize → Cover pages → Merge → ZIP
 - **Multi-language UI** — Finnish (default) and English
-- **Category Management** — Categories loaded from Azure Table Storage (IJS/MUPI judging methods)
+- **Category Management** — Categories loaded from Azure Table Storage (ISU/MUPI judging methods); synchronized-skating categories can be switched between ISU and MUPI per competition
 - **Competition Workflow** — List, create, upload PDFs, generate and download judging packets
 - **Serverless & Secure** — Azure Functions with Managed Identity for storage access
+
+## Judging Method: ISU vs MUPI
+
+Every category has a judging method, **ISU** or **MUPI**, which decides which FSM exports a segment needs before packets can be generated:
+
+| Method | Required per segment | Required once per category |
+|---|---|---|
+| MUPI | `StartListwithTimes`, `ISUPanelofJudgesandTechnicalPanel`, `JudgesSheetAll`, `RefereeSheet` | `CalculationSetupVerificationforReferee` |
+| ISU | the MUPI set plus `PlannedProgramContent`, `TechnicalControllerSheet` and at least one `TechnicalSpecialistSheet` | `CalculationSetupVerificationforReferee` |
+
+The method comes from the `categories` Azure Table (`JudgingMethod` column, one row per category abbreviation). The generated packets themselves do not depend on it: each official gets the sheets that exist for their role, so the method only controls the required-file check, the ISU/MUPI marker on the category card, and the `JudgingMethod` value recorded in the competition's statistics.
+
+### Switching a synchronized skating category
+
+Synchronized skating categories are judged under ISU in some competitions and under MUPI in others, so for them the table value is only a default. On the competition page, every synchronized skating category card shows an **ISU | MUPI** control in its header instead of the plain marker:
+
+1. Click the method the competition uses. The card re-validates at once: switching to MUPI drops the three ISU-only files from the missing list, switching to ISU adds them back, and the Generate button follows.
+2. The choice is saved immediately for **this competition only** and survives reloads. All `#N` split groups of the same category switch together.
+3. Clicking the method that matches the table default clears the override, so a later correction of the table applies again to this competition.
+
+The control appears only for categories whose table row has the competition type `Synchronized skating` (compared case-insensitively). Other categories cannot be switched; change their `JudgingMethod` in the table instead, which affects every competition.
+
+### Where the choice lives
+
+The override is stored in the competition's `metadata.json` next to the language setting:
+
+```json
+{ "judgingMethodOverrides": { "FSKXSYNCHRONMLAIKU": "ISU" } }
+```
+
+Keys are category abbreviations, values `ISU` or `MUPI`; only deviations from the table default are kept. The UI writes it through `POST /api/save_competition_settings` (`{ "id": "<competition id>", "settings": { "judgingMethodOverrides": { ... } } }`, full map on every save, invalid values are rejected with 400). `GET /api/get_competition_details` returns each file's effective `judgingMethod` together with `defaultJudgingMethod` and `judgingMethodOverridable`, plus the stored map as `judgingMethodOverrides`. `generate_judging_papers` reads the map from `metadata.json` itself when it records statistics, so the client cannot desynchronise it.
 
 ## Branch Strategy
 
