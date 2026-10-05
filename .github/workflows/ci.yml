@@ -1,0 +1,38 @@
+name: CI
+
+# A build check on every pull request. There is no test suite, so this installs
+# the backend's requirements, imports them and byte-compiles every module — enough
+# to catch a broken Dependabot bump or a syntax error before the merge deploys
+# prod. The `build` job name is the required status check in the `main` ruleset —
+# rename it there too if it changes. Runner pinned like deploy.yml; never
+# ubuntu-latest.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install backend requirements
+        working-directory: infra/functions
+        run: pip install -r requirements.txt
+
+      - name: Import the dependencies
+        run: python -c "import azure.functions, azure.storage.blob, azure.identity, azure.data.tables, pypdf, reportlab, PIL"
+
+      - name: Byte-compile the backend
+        run: python -m compileall -q infra/functions
