@@ -27,6 +27,7 @@ from categories import (
     effective_judging_method,
 )
 from competition_schedule import parse_competition_schedule, get_schedule_start_time
+import email_sender
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -45,6 +46,14 @@ DELETION_RETENTION_DAYS = 60
 DELETION_EXTENSION_DAYS = 7
 LEGACY_DELETION_DATE = "2026-06-12T00:00:00Z"
 AUTO_CLEANUP_ACTOR = "auto-cleanup"
+
+# "Send judges' papers" e-mail: link lifetime (capped at the competition's
+# DeletionDate), the shortest lifetime still worth sending, the per-user send
+# limit, and the generated files that may be sent (the merged daily PDFs).
+SEND_LINK_VALIDITY_DAYS = 5
+SEND_MIN_LINK_VALIDITY = timedelta(hours=1)
+SEND_RATE_LIMIT_PER_DAY = 10
+_SENDABLE_FILE_RE = re.compile(r"judgingpapers_[A-Za-z0-9_-]+\.pdf")
 
 def is_user_allowed(email: str) -> bool:
     """
@@ -475,7 +484,8 @@ def _ensure_deletion_date(comp_table, entity):
     return entity
 
 
-def _bump_competition_counters(comp_id, uploaded_delta=0, generate_delta=0, set_last_generated=False):
+def _bump_competition_counters(comp_id, uploaded_delta=0, generate_delta=0, set_last_generated=False,
+                               email_sent_delta=0):
     """
     Best-effort update of usage counters on the competitions entity.
     Never raises — counter failures must not fail the user's operation.
@@ -492,6 +502,8 @@ def _bump_competition_counters(comp_id, uploaded_delta=0, generate_delta=0, set_
             update["GenerateRunCount"] = int(entity.get("GenerateRunCount", 0)) + generate_delta
         if set_last_generated:
             update["LastGeneratedDate"] = f"{datetime.utcnow().isoformat()}Z"
+        if email_sent_delta:
+            update["EmailSentCount"] = int(entity.get("EmailSentCount", 0)) + email_sent_delta
         comp_table.update_entity(update, mode=UpdateMode.MERGE)
     except Exception as e:
         logging.warning(f"Failed to update counters for competition {comp_id}: {e}")
@@ -593,6 +605,49 @@ def migrate_legacy_row(comp_table, entity):
     return new_entity
 
 
+def generate_blob_read_sas_url(blob_service_client, container_name, blob_name, start_time, expiry):
+    """
+    Read-only SAS URL for one blob, valid from start_time to expiry (UTC).
+    Managed identity signs with a user-delegation key (max 7 days), a
+    connection string with the account key. Returns None when neither
+    credential can sign.
+    """
+    account_name = blob_service_client.account_name
+    blob_url_base = f"https://{account_name}.blob.core.windows.net/{container_name}/{blob_name}"
+    sas_token = ""
+
+    # Managed Identity Logic
+    if os.environ.get("AzureWebJobsStorage__accountName"):
+         ud_key = blob_service_client.get_user_delegation_key(start_time, expiry)
+         sas_token = generate_blob_sas(
+             account_name=account_name,
+             container_name=container_name,
+             blob_name=blob_name,
+             user_delegation_key=ud_key,
+             permission=BlobSasPermissions(read=True),
+             expiry=expiry,
+             start=start_time
+         )
+    else:
+         # Connection String Logic (Dev)
+         conn_str = os.environ.get("AzureWebJobsStorage")
+         if conn_str:
+             items = dict(item.split('=', 1) for item in conn_str.split(';') if '=' in item)
+             key = items.get('AccountKey')
+             if key:
+                 sas_token = generate_blob_sas(
+                     account_name=items.get('AccountName'),
+                     container_name=container_name,
+                     blob_name=blob_name,
+                     account_key=key,
+                     permission=BlobSasPermissions(read=True),
+                     expiry=expiry,
+                     start=start_time
+                 )
+
+    return f"{blob_url_base}?{sas_token}" if sas_token else None
+
+
 def create_and_store_sas_link(blob_service_client, container_name, blob_name, competition, filename, file_size=0):
     try:
         table_client = get_table_client()
@@ -609,43 +664,9 @@ def create_and_store_sas_link(blob_service_client, container_name, blob_name, co
         # Generate SAS
         start_time = datetime.utcnow()
         expiry = start_time + timedelta(days=5)
-        sas_token = ""
-        
-        account_name = blob_service_client.account_name
-        blob_url_base = f"https://{account_name}.blob.core.windows.net/{container_name}/{blob_name}"
-        
-        # Managed Identity Logic
-        if os.environ.get("AzureWebJobsStorage__accountName"):
-             ud_key = blob_service_client.get_user_delegation_key(start_time, expiry)
-             sas_token = generate_blob_sas(
-                 account_name=account_name,
-                 container_name=container_name,
-                 blob_name=blob_name,
-                 user_delegation_key=ud_key,
-                 permission=BlobSasPermissions(read=True),
-                 expiry=expiry,
-                 start=start_time
-             )
-        else:
-             # Connection String Logic (Dev)
-             conn_str = os.environ.get("AzureWebJobsStorage")
-             if conn_str:
-                 items = dict(item.split('=', 1) for item in conn_str.split(';') if '=' in item)
-                 key = items.get('AccountKey')
-                 if key:
-                     sas_token = generate_blob_sas(
-                         account_name=items.get('AccountName'),
-                         container_name=container_name,
-                         blob_name=blob_name,
-                         account_key=key,
-                         permission=BlobSasPermissions(read=True),
-                         expiry=expiry,
-                         start=start_time
-                     )
+        full_url = generate_blob_read_sas_url(blob_service_client, container_name, blob_name, start_time, expiry)
 
-        if sas_token:
-            full_url = f"{blob_url_base}?{sas_token}"
-            
+        if full_url:
             # Determine Description
             desc = "Individual judge papers (ZIP)" if filename.lower().endswith('.zip') else "All judge papers (PDF)"
             
@@ -1016,6 +1037,18 @@ def _delete_competition_data(entity, deleted_by):
             logging.info(f"Deleted {table_count} table rows for competition {comp_id}")
     except Exception as table_err:
         logging.warning(f"Error deleting table entities: {table_err}")
+
+    # Delete the send-e-mail audit rows (they hold recipient addresses)
+    try:
+        sent_table = get_table_client("sentemails")
+        if sent_table:
+            safe_pk = comp_id.replace("'", "''")
+            for row in sent_table.query_entities(f"PartitionKey eq '{safe_pk}'"):
+                sent_table.delete_entity(partition_key=row['PartitionKey'], row_key=row['RowKey'])
+    except ResourceNotFoundError:
+        pass
+    except Exception as sent_err:
+        logging.warning(f"Error deleting sent-email rows: {sent_err}")
 
     # Keep the competitions row as permanent history: hide it and record the deletion
     comp_table = get_table_client("competitions")
@@ -1756,6 +1789,155 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
         # Cleanup
         if 'temp_dir' in locals() and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
+def _sends_in_last_day(sent_table, email):
+    """Number of e-mails this user sent in the last 24 h (any competition)."""
+    since = _iso_utc(datetime.now(timezone.utc) - timedelta(days=1))
+    safe_email = email.replace("'", "''")
+    rows = sent_table.query_entities(
+        f"SentBy eq '{safe_email}' and SentDate ge '{since}'", select=["RowKey"])
+    return sum(1 for _ in rows)
+
+
+@app.route(route="send_judge_papers", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    E-mail a fresh download link of one merged judges'-papers PDF.
+    Body: {id, fileName, to, resultsServiceEmail, senderName, language: fi|en}.
+    The Results Service e-mail is both Cc and Reply-To.
+    """
+    logging.info("Sending judges' papers e-mail...")
+
+    email = get_user_email_from_header(req)
+    if not email:
+        return func.HttpResponse("Unauthorized", status_code=401)
+    if not is_user_allowed(email):
+        return func.HttpResponse("Forbidden", status_code=403)
+
+    try:
+        req_body = req.get_json()
+    except ValueError:
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    if not isinstance(req_body, dict):
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+
+    comp_id = req_body.get('id')
+    file_name = req_body.get('fileName')
+    to = email_sender.validate_email_address(req_body.get('to'))
+    results_service_email = email_sender.validate_email_address(req_body.get('resultsServiceEmail'))
+    sender_name = email_sender.validate_sender_name(req_body.get('senderName'))
+    language = req_body.get('language')
+
+    if not comp_id or not isinstance(comp_id, str):
+        return func.HttpResponse("Missing id parameter", status_code=400)
+    if not isinstance(file_name, str) or not _SENDABLE_FILE_RE.fullmatch(file_name):
+        return func.HttpResponse("Only the merged judges' papers PDFs can be sent", status_code=400)
+    if not to:
+        return func.HttpResponse("Invalid recipient e-mail address", status_code=400)
+    if not results_service_email:
+        return func.HttpResponse("Invalid Results Service e-mail address", status_code=400)
+    if not sender_name:
+        return func.HttpResponse(
+            f"Invalid sender name (1-{email_sender.SENDER_NAME_MAX_LENGTH} characters, no / : @ < >)",
+            status_code=400)
+    if language not in email_sender.LANGUAGES:
+        return func.HttpResponse("Invalid language", status_code=400)
+
+    try:
+        entity = get_competition_entity(comp_id)
+        if not entity or entity.get("Visible") is False:
+            return func.HttpResponse("Competition not found", status_code=404)
+
+        # The file must be one this competition actually generated: never mint
+        # a SAS for an arbitrary blob name taken from the request.
+        papers_table = get_table_client()
+        if not papers_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+        try:
+            papers_table.get_entity(partition_key=comp_id, row_key=file_name)
+        except ResourceNotFoundError:
+            return func.HttpResponse("Generated file not found", status_code=404)
+
+        blob_service_client = get_blob_service_client()
+        if not blob_service_client:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+        container_name = "fs-judgepapers"
+        folder_path = entity.get("FolderPath", comp_id).strip("/")
+        blob_name = f"{folder_path}/judgePapers/{file_name}"
+        if not blob_service_client.get_container_client(container_name).get_blob_client(blob_name).exists():
+            return func.HttpResponse("Generated file not found", status_code=404)
+
+        # Fresh link, but never outliving the competition's auto-deletion.
+        now = datetime.now(timezone.utc)
+        expiry = now + timedelta(days=SEND_LINK_VALIDITY_DAYS)
+        deletion = _parse_iso_utc(entity.get("DeletionDate"))
+        if deletion and deletion < expiry:
+            expiry = deletion
+        if expiry - now < SEND_MIN_LINK_VALIDITY:
+            return func.HttpResponse(
+                "The competition is about to be deleted; extend its retention before sending",
+                status_code=409)
+
+        sent_table = get_table_client("sentemails")
+        if sent_table:
+            try:
+                sent_table.create_table()
+            except Exception:
+                pass
+            try:
+                if _sends_in_last_day(sent_table, email) >= SEND_RATE_LIMIT_PER_DAY:
+                    return func.HttpResponse(
+                        f"Daily limit of {SEND_RATE_LIMIT_PER_DAY} e-mails reached, try again later",
+                        status_code=429)
+            except Exception as e:
+                logging.warning(f"Send rate-limit check failed, allowing the send: {e}")
+
+        # Start a few minutes back so recipient/storage clock skew can't
+        # make a just-minted link "not yet valid".
+        url = generate_blob_read_sas_url(
+            blob_service_client, container_name, blob_name, now - timedelta(minutes=5), expiry)
+        if not url:
+            return func.HttpResponse("Could not create a download link", status_code=500)
+
+        message = email_sender.build_message(
+            language, to, results_service_email, sender_name, url, expiry)
+        try:
+            result = email_sender.send_message(message)
+        except email_sender.EmailSendError as e:
+            logging.error(f"Judges' papers e-mail for {comp_id} failed: {e}")
+            return func.HttpResponse("The e-mail service rejected the message, try again later", status_code=502)
+
+        logging.info(f"Sent {file_name} of {comp_id} to {to} (cc {results_service_email}) "
+                     f"by {email}, Mailgun id {result['id']}, dry run {result['dryRun']}")
+
+        if sent_table:
+            try:
+                sent_table.create_entity({
+                    "PartitionKey": comp_id,
+                    "RowKey": uuid4().hex,
+                    "SentBy": email,
+                    "To": to,
+                    "Cc": results_service_email,
+                    "FileName": file_name,
+                    "Language": language,
+                    "SentDate": _iso_utc(now),
+                    "LinkExpiry": _iso_utc(expiry),
+                    "MailgunId": result["id"] or "",
+                    "DryRun": result["dryRun"],
+                })
+            except Exception as e:
+                logging.warning(f"Failed to store sent-email audit row: {e}")
+        _bump_competition_counters(comp_id, email_sent_delta=1)
+
+        return func.HttpResponse(json.dumps({
+            "expiryDate": _iso_utc(expiry),
+            "expiryDisplay": email_sender.format_expiry(expiry, language),
+            "dryRun": result["dryRun"],
+        }), mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Error sending judges' papers e-mail: {e}", exc_info=True)
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
 @app.route(route="upload_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def upload_file(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Uploading file...')

@@ -17,6 +17,16 @@ param proxySharedSecret string = ''
 param platformStorageAccountName string = ''
 param platformDataContainerName string = 'competition-data'
 
+// "Send judges' papers" e-mail via Mailgun (EU region). Empty key = dry run
+// (the message is only logged). Empty video URL = that line is left out. See
+// email_sender.py.
+@secure()
+param mailgunApiKey string = ''
+param exampleVideoUrl string = ''
+param mailgunApiBase string = 'https://api.eu.mailgun.net'
+param mailgunDomain string = 'figureskatingtools.com'
+param emailFromAddress string = 'no-reply@figureskatingtools.com'
+
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: appServicePlanName
   location: location
@@ -81,6 +91,26 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'PLATFORM_DATA_CONTAINER'
           value: platformDataContainerName
+        }
+        {
+          name: 'MAILGUN_API_KEY'
+          value: mailgunApiKey
+        }
+        {
+          name: 'MAILGUN_API_BASE'
+          value: mailgunApiBase
+        }
+        {
+          name: 'MAILGUN_DOMAIN'
+          value: mailgunDomain
+        }
+        {
+          name: 'EMAIL_FROM_ADDRESS'
+          value: emailFromAddress
+        }
+        {
+          name: 'EXAMPLE_VIDEO_URL'
+          value: exampleVideoUrl
         }
       ]
     }

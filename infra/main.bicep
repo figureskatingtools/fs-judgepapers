@@ -18,6 +18,14 @@ param proxySharedSecret string = ''
 param platformStorageAccountName string = ''
 param platformDataContainerName string = 'competition-data'
 
+// Mailgun domain sending key for the "send judges' papers" e-mail. Empty = the
+// function only logs the message (dry run). See email_sender.py.
+@secure()
+param mailgunApiKey string = ''
+
+// Printing example video linked from that e-mail. Empty = the line is left out.
+param exampleVideoUrl string = ''
+
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
   name: resourceGroupName
   location: location
@@ -46,6 +54,8 @@ module function 'modules/function.bicep' = {
     proxySharedSecret: proxySharedSecret
     platformStorageAccountName: platformStorageAccountName
     platformDataContainerName: platformDataContainerName
+    mailgunApiKey: mailgunApiKey
+    exampleVideoUrl: exampleVideoUrl
   }
 }
 
