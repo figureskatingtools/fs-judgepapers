@@ -1798,27 +1798,24 @@ def _sends_in_last_day(sent_table, email):
     return sum(1 for _ in rows)
 
 
-@app.route(route="send_judge_papers", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
-def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
+def _parse_send_request(req: func.HttpRequest, require_recipients: bool):
     """
-    E-mail a fresh download link of one merged judges'-papers PDF.
-    Body: {id, fileName, to, resultsServiceEmail, senderName, language: fi|en}.
-    The Results Service e-mail is both Cc and Reply-To.
+    Shared auth, validation and lookups of send_judge_papers and its preview.
+    Returns (context dict, None) or (None, error HttpResponse). The preview
+    passes require_recipients=False: it renders before the addresses are typed.
     """
-    logging.info("Sending judges' papers e-mail...")
-
     email = get_user_email_from_header(req)
     if not email:
-        return func.HttpResponse("Unauthorized", status_code=401)
+        return None, func.HttpResponse("Unauthorized", status_code=401)
     if not is_user_allowed(email):
-        return func.HttpResponse("Forbidden", status_code=403)
+        return None, func.HttpResponse("Forbidden", status_code=403)
 
     try:
         req_body = req.get_json()
     except ValueError:
-        return func.HttpResponse("Invalid JSON body", status_code=400)
+        return None, func.HttpResponse("Invalid JSON body", status_code=400)
     if not isinstance(req_body, dict):
-        return func.HttpResponse("Invalid JSON body", status_code=400)
+        return None, func.HttpResponse("Invalid JSON body", status_code=400)
 
     comp_id = req_body.get('id')
     file_name = req_body.get('fileName')
@@ -1828,54 +1825,107 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
     language = req_body.get('language')
 
     if not comp_id or not isinstance(comp_id, str):
-        return func.HttpResponse("Missing id parameter", status_code=400)
+        return None, func.HttpResponse("Missing id parameter", status_code=400)
     if not isinstance(file_name, str) or not _SENDABLE_FILE_RE.fullmatch(file_name):
-        return func.HttpResponse("Only the merged judges' papers PDFs can be sent", status_code=400)
-    if not to:
-        return func.HttpResponse("Invalid recipient e-mail address", status_code=400)
-    if not results_service_email:
-        return func.HttpResponse("Invalid Results Service e-mail address", status_code=400)
+        return None, func.HttpResponse("Only the merged judges' papers PDFs can be sent", status_code=400)
+    if require_recipients and not to:
+        return None, func.HttpResponse("Invalid recipient e-mail address", status_code=400)
+    if require_recipients and not results_service_email:
+        return None, func.HttpResponse("Invalid Results Service e-mail address", status_code=400)
     if not sender_name:
-        return func.HttpResponse(
+        return None, func.HttpResponse(
             f"Invalid sender name (1-{email_sender.SENDER_NAME_MAX_LENGTH} characters, no / : @ < >)",
             status_code=400)
     if language not in email_sender.LANGUAGES:
-        return func.HttpResponse("Invalid language", status_code=400)
+        return None, func.HttpResponse("Invalid language", status_code=400)
+
+    entity = get_competition_entity(comp_id)
+    if not entity or entity.get("Visible") is False:
+        return None, func.HttpResponse("Competition not found", status_code=404)
+
+    # The file must be one this competition actually generated: never mint
+    # a SAS for an arbitrary blob name taken from the request.
+    papers_table = get_table_client()
+    if not papers_table:
+        return None, func.HttpResponse("Storage configuration invalid", status_code=500)
+    try:
+        papers_table.get_entity(partition_key=comp_id, row_key=file_name)
+    except ResourceNotFoundError:
+        return None, func.HttpResponse("Generated file not found", status_code=404)
+
+    # Fresh link, but never outliving the competition's auto-deletion.
+    now = datetime.now(timezone.utc)
+    expiry = now + timedelta(days=SEND_LINK_VALIDITY_DAYS)
+    deletion = _parse_iso_utc(entity.get("DeletionDate"))
+    if deletion and deletion < expiry:
+        expiry = deletion
+    if expiry - now < SEND_MIN_LINK_VALIDITY:
+        return None, func.HttpResponse(
+            "The competition is about to be deleted; extend its retention before sending",
+            status_code=409)
+
+    return {
+        "email": email,
+        "compId": comp_id,
+        "entity": entity,
+        "fileName": file_name,
+        "to": to,
+        "resultsServiceEmail": results_service_email,
+        "senderName": sender_name,
+        "language": language,
+        "now": now,
+        "expiry": expiry,
+    }, None
+
+
+@app.route(route="preview_judge_papers_email", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def preview_judge_papers_email(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Render the send_judge_papers e-mail without sending it (same body; the
+    addresses are optional). Mints no link and doesn't count toward the limit.
+    """
+    try:
+        ctx, error = _parse_send_request(req, require_recipients=False)
+        if error:
+            return error
+        preview = email_sender.render_preview(ctx["language"], ctx["senderName"], ctx["expiry"])
+        return func.HttpResponse(json.dumps({
+            **preview,
+            "to": ctx["to"],
+            "cc": ctx["resultsServiceEmail"],
+            "replyTo": ctx["resultsServiceEmail"],
+            "expiryDisplay": email_sender.format_expiry(ctx["expiry"], ctx["language"]),
+        }), mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Error previewing judges' papers e-mail: {e}", exc_info=True)
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.route(route="send_judge_papers", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    E-mail a fresh download link of one merged judges'-papers PDF.
+    Body: {id, fileName, to, resultsServiceEmail, senderName, language: fi|en}.
+    The Results Service e-mail is both Cc and Reply-To.
+    """
+    logging.info("Sending judges' papers e-mail...")
 
     try:
-        entity = get_competition_entity(comp_id)
-        if not entity or entity.get("Visible") is False:
-            return func.HttpResponse("Competition not found", status_code=404)
-
-        # The file must be one this competition actually generated: never mint
-        # a SAS for an arbitrary blob name taken from the request.
-        papers_table = get_table_client()
-        if not papers_table:
-            return func.HttpResponse("Storage configuration invalid", status_code=500)
-        try:
-            papers_table.get_entity(partition_key=comp_id, row_key=file_name)
-        except ResourceNotFoundError:
-            return func.HttpResponse("Generated file not found", status_code=404)
+        ctx, error = _parse_send_request(req, require_recipients=True)
+        if error:
+            return error
+        email, comp_id, file_name = ctx["email"], ctx["compId"], ctx["fileName"]
+        to, results_service_email = ctx["to"], ctx["resultsServiceEmail"]
+        language, now, expiry = ctx["language"], ctx["now"], ctx["expiry"]
 
         blob_service_client = get_blob_service_client()
         if not blob_service_client:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
         container_name = "fs-judgepapers"
-        folder_path = entity.get("FolderPath", comp_id).strip("/")
+        folder_path = ctx["entity"].get("FolderPath", comp_id).strip("/")
         blob_name = f"{folder_path}/judgePapers/{file_name}"
         if not blob_service_client.get_container_client(container_name).get_blob_client(blob_name).exists():
             return func.HttpResponse("Generated file not found", status_code=404)
-
-        # Fresh link, but never outliving the competition's auto-deletion.
-        now = datetime.now(timezone.utc)
-        expiry = now + timedelta(days=SEND_LINK_VALIDITY_DAYS)
-        deletion = _parse_iso_utc(entity.get("DeletionDate"))
-        if deletion and deletion < expiry:
-            expiry = deletion
-        if expiry - now < SEND_MIN_LINK_VALIDITY:
-            return func.HttpResponse(
-                "The competition is about to be deleted; extend its retention before sending",
-                status_code=409)
 
         sent_table = get_table_client("sentemails")
         if sent_table:
@@ -1899,7 +1949,7 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse("Could not create a download link", status_code=500)
 
         message = email_sender.build_message(
-            language, to, results_service_email, sender_name, url, expiry)
+            language, to, results_service_email, ctx["senderName"], url, expiry)
         try:
             result = email_sender.send_message(message)
         except email_sender.EmailSendError as e:

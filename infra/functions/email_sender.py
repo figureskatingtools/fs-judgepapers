@@ -60,11 +60,11 @@ _EN_MONTHS = ("January", "February", "March", "April", "May", "June", "July",
 # video URL is configured.
 TEMPLATES = {
     "fi": {
-        "subject": "🖨️ Tuomaripaperit tulostettavaksi",
+        "subject": "Tuomaripaperit tulostettavaksi",
         "linkText": "Avaa tuomaripaperit",
         "body": """Terve! 👋
 
-Ohessa linkki tuomaripapereiden tulostusta varten. Linkki on voimassa {{expiryDate}} asti ⏳, joten tulostattehan paperit ennen kilpailun alkua.
+🖨️ Ohessa linkki tuomaripapereiden tulostusta varten. Linkki on voimassa {{expiryDate}} asti ⏳, joten tulostattehan paperit ennen kilpailun alkua.
 
 📋 Paperit ovat valmiiksi järjestyksessä: ne on niputettu tuomarikohtaisesti etunimen mukaan aakkosjärjestykseen, ja kunkin tuomarin paperit on lajiteltu sarjoittain.
 
@@ -72,7 +72,7 @@ Ohessa linkki tuomaripapereiden tulostusta varten. Linkki on voimassa {{expiryDa
 
 🔗 Linkki tuomaripapereihin: {{judgePapersUrl}}
 
-Hyvää kilpailua! ⛸️✨
+Mikäli jotain kysyttävää ilmenee, olethan yhteydessä.
 
 Terveisin,
 {{senderName}}
@@ -83,11 +83,11 @@ Sent from Figureskatingtools.com - Supporting Figure Skating Community ❤️
 """,
     },
     "en": {
-        "subject": "🖨️ Judges' papers ready for printing",
+        "subject": "Judges' papers ready for printing",
         "linkText": "Open the judges' papers",
         "body": """Hi there! 👋
 
-Here's the link for printing the judges' papers. The link is valid until {{expiryDate}} ⏳, so please make sure to print the papers before the competition starts.
+🖨️ Here's the link for printing the judges' papers. The link is valid until {{expiryDate}} ⏳, so please make sure to print the papers before the competition starts.
 
 📋 The papers are already in order: grouped by judge in alphabetical order by first name, with each judge's papers sorted by category.
 
@@ -95,7 +95,7 @@ Here's the link for printing the judges' papers. The link is valid until {{expir
 
 🔗 Link to the judges' papers: {{judgePapersUrl}}
 
-Have a great competition! ⛸️✨
+If you have any questions, please get in touch.
 
 Best regards,
 {{senderName}}
@@ -207,29 +207,46 @@ def _render(language, values):
     return template["subject"], text, body_html
 
 
-def build_message(language, to, results_service_email, sender_name, judge_papers_url, expiry):
-    """Build the MIME message (an EmailMessage) for the judges'-papers mail."""
+def _from_address(sender_name):
+    from_address = os.environ.get("EMAIL_FROM_ADDRESS") or DEFAULT_FROM_ADDRESS
+    from_user, from_domain = from_address.split("@", 1)
+    return Address(display_name=f"{sender_name} ({FROM_DISPLAY_SUFFIX})",
+                   username=from_user, domain=from_domain)
+
+
+def _render_for(language, sender_name, judge_papers_url, expiry):
     if language not in LANGUAGES:
         raise ValueError(f"Unsupported language: {language}")
-    from_address = os.environ.get("EMAIL_FROM_ADDRESS") or DEFAULT_FROM_ADDRESS
-    values = {
+    return _render(language, {
         "expiryDate": format_expiry(expiry, language),
         "exampleVideoUrl": example_video_url(),
         "judgePapersUrl": judge_papers_url,
         "senderName": sender_name,
-    }
-    subject, text, body_html = _render(language, values)
+    })
 
-    from_user, from_domain = from_address.split("@", 1)
+
+def render_preview(language, sender_name, expiry):
+    """
+    What build_message would send, for the UI preview: {subject, from, html}.
+    The download link is only minted at send time, so it points nowhere here.
+    """
+    subject, _text, body_html = _render_for(language, sender_name, "#", expiry)
+    return {"subject": subject, "from": str(_from_address(sender_name)), "html": body_html}
+
+
+def build_message(language, to, results_service_email, sender_name, judge_papers_url, expiry):
+    """Build the MIME message (an EmailMessage) for the judges'-papers mail."""
+    subject, text, body_html = _render_for(language, sender_name, judge_papers_url, expiry)
+
+    from_address = _from_address(sender_name)
     msg = EmailMessage(policy=policy.SMTP)
     msg["Subject"] = subject
-    msg["From"] = Address(display_name=f"{sender_name} ({FROM_DISPLAY_SUFFIX})",
-                          username=from_user, domain=from_domain)
+    msg["From"] = from_address
     msg["To"] = to
     msg["Cc"] = results_service_email
     msg["Reply-To"] = results_service_email
     msg["Date"] = formatdate(usegmt=True)
-    msg["Message-ID"] = make_msgid(domain=from_domain)
+    msg["Message-ID"] = make_msgid(domain=from_address.domain)
     msg.set_content(text, charset="utf-8", cte="quoted-printable")
     msg.add_alternative(body_html, subtype="html", charset="utf-8", cte="quoted-printable")
     return msg
