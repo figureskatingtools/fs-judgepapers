@@ -52,7 +52,7 @@ AUTO_CLEANUP_ACTOR = "auto-cleanup"
 # limit, and the generated files that may be sent (the merged daily PDFs).
 SEND_LINK_VALIDITY_DAYS = 5
 SEND_MIN_LINK_VALIDITY = timedelta(hours=1)
-SEND_RATE_LIMIT_PER_DAY = 10
+SEND_RATE_LIMIT_PER_DAY = 20
 _SENDABLE_FILE_RE = re.compile(r"judgingpapers_[A-Za-z0-9_-]+\.pdf")
 
 def is_user_allowed(email: str) -> bool:
@@ -1893,7 +1893,6 @@ def preview_judge_papers_email(req: func.HttpRequest) -> func.HttpResponse:
             **preview,
             "to": ctx["to"],
             "cc": ctx["resultsServiceEmail"],
-            "replyTo": ctx["resultsServiceEmail"],
             "expiryDisplay": email_sender.format_expiry(ctx["expiry"], ctx["language"]),
         }), mimetype="application/json")
     except Exception as e:
@@ -1906,7 +1905,7 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
     """
     E-mail a fresh download link of one merged judges'-papers PDF.
     Body: {id, fileName, to, resultsServiceEmail, senderName, language: fi|en}.
-    The Results Service e-mail is both Cc and Reply-To.
+    The Results Service e-mail gets a copy (Cc); there is no Reply-To.
     """
     logging.info("Sending judges' papers e-mail...")
 

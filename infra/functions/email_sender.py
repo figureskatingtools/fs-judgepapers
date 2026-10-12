@@ -244,7 +244,6 @@ def build_message(language, to, results_service_email, sender_name, judge_papers
     msg["From"] = from_address
     msg["To"] = to
     msg["Cc"] = results_service_email
-    msg["Reply-To"] = results_service_email
     msg["Date"] = formatdate(usegmt=True)
     msg["Message-ID"] = make_msgid(domain=from_address.domain)
     msg.set_content(text, charset="utf-8", cte="quoted-printable")
