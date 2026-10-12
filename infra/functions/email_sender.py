@@ -35,7 +35,7 @@ from zoneinfo import ZoneInfo
 DEFAULT_API_BASE = "https://api.eu.mailgun.net"
 DEFAULT_DOMAIN = "figureskatingtools.com"
 DEFAULT_FROM_ADDRESS = "no-reply@figureskatingtools.com"
-FROM_DISPLAY_SUFFIX = "Figureskatingtools.com"
+FROM_DISPLAY_NAME = "Figureskatingtools.com"
 MAILGUN_TIMEOUT_SECONDS = 20
 
 LANGUAGES = ("fi", "en")
@@ -207,10 +207,10 @@ def _render(language, values):
     return template["subject"], text, body_html
 
 
-def _from_address(sender_name):
+def _from_address():
     from_address = os.environ.get("EMAIL_FROM_ADDRESS") or DEFAULT_FROM_ADDRESS
     from_user, from_domain = from_address.split("@", 1)
-    return Address(display_name=f"{sender_name} ({FROM_DISPLAY_SUFFIX})",
+    return Address(display_name=FROM_DISPLAY_NAME,
                    username=from_user, domain=from_domain)
 
 
@@ -231,14 +231,14 @@ def render_preview(language, sender_name, expiry):
     The download link is only minted at send time, so it points nowhere here.
     """
     subject, _text, body_html = _render_for(language, sender_name, "#", expiry)
-    return {"subject": subject, "from": str(_from_address(sender_name)), "html": body_html}
+    return {"subject": subject, "from": str(_from_address()), "html": body_html}
 
 
 def build_message(language, to, results_service_email, sender_name, judge_papers_url, expiry):
     """Build the MIME message (an EmailMessage) for the judges'-papers mail."""
     subject, text, body_html = _render_for(language, sender_name, judge_papers_url, expiry)
 
-    from_address = _from_address(sender_name)
+    from_address = _from_address()
     msg = EmailMessage(policy=policy.SMTP)
     msg["Subject"] = subject
     msg["From"] = from_address
