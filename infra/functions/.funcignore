@@ -9,3 +9,6 @@ test_*.py
 *.pyc
 __pycache__
 .venv
+tests
+requirements-dev.txt
+.pytest_cache
