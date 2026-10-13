@@ -6,6 +6,7 @@ import shutil
 import base64
 import json
 import re
+import secrets
 import unicodedata
 import io
 from pypdf import PdfReader
@@ -53,6 +54,12 @@ AUTO_CLEANUP_ACTOR = "auto-cleanup"
 SEND_LINK_VALIDITY_DAYS = 5
 SEND_MIN_LINK_VALIDITY = timedelta(hours=1)
 SEND_RATE_LIMIT_PER_DAY = 20
+# The e-mailed link is ours (PUBLIC_BASE_URL/judgepapers/download?t=<token>),
+# not a blob SAS URL: Microsoft's filters junk mail linking to
+# *.blob.core.windows.net. Each click mints a short-lived SAS and redirects.
+DOWNLOAD_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32}")
+DOWNLOAD_SAS_VALIDITY = timedelta(minutes=15)
+DEFAULT_PUBLIC_BASE_URL = "https://figureskatingtools.com"
 _SENDABLE_FILE_RE = re.compile(r"judgingpapers_[A-Za-z0-9_-]+\.pdf")
 
 def is_user_allowed(email: str) -> bool:
@@ -1903,7 +1910,7 @@ def preview_judge_papers_email(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="send_judge_papers", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
     """
-    E-mail a fresh download link of one merged judges'-papers PDF.
+    E-mail a download link of one merged judges'-papers PDF.
     Body: {id, fileName, to, resultsServiceEmail, senderName, language: fi|en}.
     The Results Service e-mail gets a copy (Cc); there is no Reply-To.
     """
@@ -1940,12 +1947,27 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
             except Exception as e:
                 logging.warning(f"Send rate-limit check failed, allowing the send: {e}")
 
-        # Start a few minutes back so recipient/storage clock skew can't
-        # make a just-minted link "not yet valid".
-        url = generate_blob_read_sas_url(
-            blob_service_client, container_name, blob_name, now - timedelta(minutes=5), expiry)
-        if not url:
-            return func.HttpResponse("Could not create a download link", status_code=500)
+        if not sent_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+
+        # The audit row doubles as the download link: its RowKey is the token
+        # download_judge_papers resolves, so it is written before sending.
+        token = secrets.token_urlsafe(24)
+        base_url = (os.environ.get("PUBLIC_BASE_URL") or DEFAULT_PUBLIC_BASE_URL).rstrip("/")
+        url = f"{base_url}/judgepapers/download?t={token}"
+        sent_table.create_entity({
+            "PartitionKey": comp_id,
+            "RowKey": token,
+            "SentBy": email,
+            "To": to,
+            "Cc": results_service_email,
+            "FileName": file_name,
+            "Language": language,
+            "SentDate": _iso_utc(now),
+            "LinkExpiry": _iso_utc(expiry),
+            "MailgunId": "",
+            "DryRun": False,
+        })
 
         message = email_sender.build_message(
             language, to, results_service_email, ctx["senderName"], url, expiry)
@@ -1953,28 +1975,24 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
             result = email_sender.send_message(message)
         except email_sender.EmailSendError as e:
             logging.error(f"Judges' papers e-mail for {comp_id} failed: {e}")
+            try:
+                sent_table.delete_entity(partition_key=comp_id, row_key=token)
+            except Exception as de:
+                logging.warning(f"Failed to remove the unsent e-mail's link row: {de}")
             return func.HttpResponse("The e-mail service rejected the message, try again later", status_code=502)
 
         logging.info(f"Sent {file_name} of {comp_id} to {to} (cc {results_service_email}) "
                      f"by {email}, Mailgun id {result['id']}, dry run {result['dryRun']}")
 
-        if sent_table:
-            try:
-                sent_table.create_entity({
-                    "PartitionKey": comp_id,
-                    "RowKey": uuid4().hex,
-                    "SentBy": email,
-                    "To": to,
-                    "Cc": results_service_email,
-                    "FileName": file_name,
-                    "Language": language,
-                    "SentDate": _iso_utc(now),
-                    "LinkExpiry": _iso_utc(expiry),
-                    "MailgunId": result["id"] or "",
-                    "DryRun": result["dryRun"],
-                })
-            except Exception as e:
-                logging.warning(f"Failed to store sent-email audit row: {e}")
+        try:
+            sent_table.update_entity({
+                "PartitionKey": comp_id,
+                "RowKey": token,
+                "MailgunId": result["id"] or "",
+                "DryRun": result["dryRun"],
+            }, mode=UpdateMode.MERGE)
+        except Exception as e:
+            logging.warning(f"Failed to record the Mailgun id on the sent-email row: {e}")
         _bump_competition_counters(comp_id, email_sent_delta=1)
 
         return func.HttpResponse(json.dumps({
@@ -1984,6 +2002,88 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         }), mimetype="application/json")
     except Exception as e:
         logging.error(f"Error sending judges' papers e-mail: {e}", exc_info=True)
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+_DOWNLOAD_NOT_FOUND = ("Linkkiä ei löydy tai tiedosto on poistettu.\n"
+                       "This link is invalid or the file has been removed.\n")
+_DOWNLOAD_EXPIRED = ("Linkki on vanhentunut. Pyydä lähettäjältä uusi linkki.\n"
+                     "This link has expired. Please ask the sender for a new one.\n")
+
+
+def _download_error(message, status_code):
+    return func.HttpResponse(message, status_code=status_code, mimetype="text/plain",
+                             charset="utf-8", headers={"Cache-Control": "no-store"})
+
+
+@app.route(route="download_judge_papers", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET", "HEAD"])
+def download_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Resolve an e-mailed download link (?t=<token>, the sentemails RowKey) to a
+    short-lived read SAS and redirect there. The recipient isn't signed in, so
+    this is the one route with no user header — the proxy secret still applies.
+    """
+    if not _proxy_secret_ok(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+
+    try:
+        token = req.params.get("t") or ""
+        if not DOWNLOAD_TOKEN_RE.fullmatch(token):
+            return _download_error(_DOWNLOAD_NOT_FOUND, 404)
+
+        sent_table = get_table_client("sentemails")
+        if not sent_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+        # Cross-partition scan, fine at a few dozen rows a year. The token is
+        # regex-checked above, so it can't break out of the filter string.
+        row = next(iter(sent_table.query_entities(f"RowKey eq '{token}'")), None)
+        if not row:
+            return _download_error(_DOWNLOAD_NOT_FOUND, 404)
+
+        now = datetime.now(timezone.utc)
+        link_expiry = _parse_iso_utc(row.get("LinkExpiry"))
+        if not link_expiry or link_expiry <= now:
+            return _download_error(_DOWNLOAD_EXPIRED, 410)
+
+        comp_id = row["PartitionKey"]
+        entity = get_competition_entity(comp_id)
+        if not entity or entity.get("Visible") is False:
+            return _download_error(_DOWNLOAD_NOT_FOUND, 404)
+
+        blob_service_client = get_blob_service_client()
+        if not blob_service_client:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+        container_name = "fs-judgepapers"
+        folder_path = entity.get("FolderPath", comp_id).strip("/")
+        blob_name = f"{folder_path}/judgePapers/{row.get('FileName', '')}"
+        if not blob_service_client.get_container_client(container_name).get_blob_client(blob_name).exists():
+            return _download_error(_DOWNLOAD_NOT_FOUND, 404)
+
+        # Start a few minutes back so clock skew can't make it "not yet valid".
+        url = generate_blob_read_sas_url(
+            blob_service_client, container_name, blob_name,
+            now - timedelta(minutes=5), min(now + DOWNLOAD_SAS_VALIDITY, link_expiry))
+        if not url:
+            return func.HttpResponse("Could not create a download link", status_code=500)
+
+        # Indicative only: mail scanners open links too.
+        try:
+            sent_table.update_entity({
+                "PartitionKey": comp_id,
+                "RowKey": token,
+                "DownloadCount": int(row.get("DownloadCount") or 0) + 1,
+                "LastDownloaded": _iso_utc(now),
+            }, mode=UpdateMode.MERGE)
+        except Exception as e:
+            logging.warning(f"Failed to count the download of {token[:6]}…: {e}")
+
+        return func.HttpResponse(status_code=302, headers={
+            "Location": url,
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+        })
+    except Exception as e:
+        logging.error(f"Error resolving a judges' papers download link: {e}", exc_info=True)
         return func.HttpResponse("Internal server error", status_code=500)
 
 

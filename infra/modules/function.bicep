@@ -26,6 +26,8 @@ param exampleVideoUrl string = ''
 param mailgunApiBase string = 'https://api.eu.mailgun.net'
 param mailgunDomain string = 'figureskatingtools.com'
 param emailFromAddress string = 'no-reply@figureskatingtools.com'
+// Origin of the e-mailed /judgepapers/download?t=<token> link.
+param publicBaseUrl string = 'https://figureskatingtools.com'
 
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: appServicePlanName
@@ -111,6 +113,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'EXAMPLE_VIDEO_URL'
           value: exampleVideoUrl
+        }
+        {
+          name: 'PUBLIC_BASE_URL'
+          value: publicBaseUrl
         }
       ]
     }

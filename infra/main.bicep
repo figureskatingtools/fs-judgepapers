@@ -26,6 +26,10 @@ param mailgunApiKey string = ''
 // Printing example video linked from that e-mail. Empty = the line is left out.
 param exampleVideoUrl string = ''
 
+// Public site origin the e-mailed download link points at (the site router
+// proxies /judgepapers/download to download_judge_papers).
+param publicBaseUrl string = 'https://figureskatingtools.com'
+
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
   name: resourceGroupName
   location: location
@@ -56,6 +60,7 @@ module function 'modules/function.bicep' = {
     platformDataContainerName: platformDataContainerName
     mailgunApiKey: mailgunApiKey
     exampleVideoUrl: exampleVideoUrl
+    publicBaseUrl: publicBaseUrl
   }
 }
 
