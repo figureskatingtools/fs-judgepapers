@@ -1263,13 +1263,12 @@ def extend_competition_deletion(req: func.HttpRequest) -> func.HttpResponse:
 
         # A record bound to a platform competition follows the platform's
         # date, which is extended on the site: here it is only synced and
-        # reported, never pushed out by a clock of this tool's own.
+        # reported, never pushed out by a clock of this tool's own. When the
+        # registry can't be read, the local fallback date is extended as
+        # before — harmless, the next successful read syncs it back.
+        unavailable = False
         if entity.get("PlatformId"):
             clock, unavailable = _read_platform_clock_safe(entity["PlatformId"])
-            if unavailable:
-                return func.HttpResponse(
-                    "platform_unavailable: could not read the competition's deletion date",
-                    status_code=503)
             if _platform_deleted(clock):
                 return func.HttpResponse(
                     "platform_deleted: this competition has been deleted", status_code=410)
@@ -1296,7 +1295,7 @@ def extend_competition_deletion(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"Extended deletion date for {comp_id} to {new_str}")
         return func.HttpResponse(json.dumps({
             "deletionDate": new_str,
-            "retentionManagedBy": RETENTION_TOOL,
+            "retentionManagedBy": RETENTION_PLATFORM if unavailable else RETENTION_TOOL,
         }), mimetype="application/json")
     except Exception as e:
         logging.error(f"Error extending deletion date for competition: {e}")

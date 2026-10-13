@@ -205,14 +205,21 @@ def test_extend_falls_back_to_a_week_when_the_platform_row_is_missing(tables, pl
     assert fa._parse_iso_utc(body["deletionDate"]) == start + timedelta(days=7)
 
 
-def test_extend_of_a_bound_record_is_503_when_the_platform_is_unreachable(tables, platform):
-    put_competition(tables, platform_id=PLATFORM_ID, deletion="2026-11-01T10:00:00Z")
-    platform.fail_get = HttpResponseError("throttled")
+def test_extend_of_a_bound_record_extends_the_local_fallback_when_the_platform_is_unreachable(
+        tables, platform):
+    # Before the site grants the table role (or during an outage) the tool's
+    # Extend button keeps working; the next successful read syncs the date back.
+    start = datetime.now(timezone.utc) + timedelta(days=10)
+    put_competition(tables, platform_id=PLATFORM_ID,
+                    deletion=start.replace(tzinfo=None).isoformat() + "Z")
+    platform.fail_get = HttpResponseError("forbidden")
 
     response = extend()
 
-    assert response.status_code == 503
-    assert tables["competitions"].row("GLOBAL", "abc12345")["DeletionDate"] == "2026-11-01T10:00:00Z"
+    assert response.status_code == 200
+    body = payload(response)
+    assert fa._parse_iso_utc(body["deletionDate"]) == start + timedelta(days=7)
+    assert body["retentionManagedBy"] == "platform"
 
 
 def test_extend_of_a_deleted_platform_competition_is_410(tables, platform):
