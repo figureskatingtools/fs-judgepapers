@@ -2047,7 +2047,10 @@ def download_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
         # Cross-partition scan, fine at a few dozen rows a year. The token is
         # regex-checked above, so it can't break out of the filter string.
-        row = next(iter(sent_table.query_entities(f"RowKey eq '{token}'")), None)
+        try:
+            row = next(iter(sent_table.query_entities(f"RowKey eq '{token}'")), None)
+        except ResourceNotFoundError:
+            row = None  # the table doesn't exist until the first e-mail is sent
         if not row:
             return _download_error(_DOWNLOAD_NOT_FOUND, 404)
 
