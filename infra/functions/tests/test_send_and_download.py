@@ -162,6 +162,12 @@ def test_a_link_into_a_deleted_competition_is_410(link, tables):
     assert "removed" in text(response)
 
 
+def test_a_storage_outage_is_a_retryable_503_not_410(link, tables):
+    tables["competitions"].fail_get = HttpResponseError("service unavailable")
+    response = download()
+    assert response.status_code == 503
+
+
 def test_a_link_whose_file_is_gone_is_410(link, blobs):
     blobs.blobs.clear()
     assert download().status_code == 410

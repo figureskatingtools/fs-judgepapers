@@ -87,7 +87,8 @@ user header; the endpoint still checks the shared secret with `_proxy_secret_ok(
 (401), then resolves the 32-character token against the `sentemails` table and
 answers `302` to a 15-minute read SAS (404 for a malformed token; 410 when
 the link expired or its data is gone — no `sentemails` row any more, the
-competition deleted, or the file removed).
+competition deleted, or the file removed; a storage failure is a retryable
+5xx, never a 410).
 
 ## Local testing
 

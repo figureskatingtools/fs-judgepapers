@@ -33,6 +33,7 @@ from platform_clock import (
     PlatformClockUnavailable,
     effective_deletion,
     get_platform_table_client,
+    normalize_platform_id,
     platform_says_delete,
     read_platform_clock,
     to_iso_z,
@@ -43,10 +44,6 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 # Maximum file upload size: 25 MB
 MAX_UPLOAD_SIZE = 25 * 1024 * 1024
 
-# Platform competition GUIDs (the PlatformId binding) always look like this.
-# Pinned before being spliced into a pool blob path — the binding originates
-# from a client body (resolve_competition).
-_UUID_RE = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 
 # Automatic competition deletion follows the platform competition's
 # DeletionDate (see the platform clock section). This tool has no clock of its
@@ -63,7 +60,7 @@ _NON_PERSONAL_ACTORS = ("", "-", USER_DELETE_ACTOR, AUTO_CLEANUP_ACTOR)
 # Outcomes of a platform clock read (_read_platform_clock_state).
 CLOCK_OK = "ok"                    # the platform row was read
 CLOCK_NOT_FOUND = "not_found"      # no such platform competition
-CLOCK_UNAVAILABLE = "unavailable"  # the registry could not be read
+CLOCK_UNAVAILABLE = "unavailable"  # the platform clock could not be read
 CLOCK_OFF = "off"                  # PLATFORM_STORAGE_ACCOUNT unset
 CLOCK_UNBOUND = "unbound"          # the record has no PlatformId
 
@@ -287,8 +284,9 @@ def _refresh_from_pool(entity, container, folder_path):
     """
     refreshed = []
     try:
-        platform_id = (entity or {}).get("PlatformId")
-        if not platform_id or not _UUID_RE.fullmatch(str(platform_id)):
+        # Pinned to a lowercase GUID before it is spliced into a pool path.
+        platform_id = normalize_platform_id((entity or {}).get("PlatformId"))
+        if not platform_id:
             return []
 
         try:
@@ -423,6 +421,21 @@ def generate_competition_id(comp_table) -> str:
     raise RuntimeError("Could not generate a unique competition id")
 
 
+def _get_competition_entity_strict(comp_id: str):
+    """
+    Like get_competition_entity, but only "not found" becomes None: any other
+    storage failure is raised, so a caller can answer a retryable 5xx instead
+    of mistaking an outage for a deleted competition.
+    """
+    comp_table = get_table_client("competitions")
+    if not comp_table:
+        raise RuntimeError("Storage configuration invalid")
+    try:
+        return comp_table.get_entity(partition_key="GLOBAL", row_key=comp_id)
+    except ResourceNotFoundError:
+        return None
+
+
 def get_competition_entity(comp_id: str):
     """Look up a competition entity by its id (RowKey). Returns None if not found."""
     try:
@@ -492,24 +505,26 @@ def _iso_utc(dt):
 # ---------------------------------------------------------------------------
 # Platform retention clock. The site's platform registry owns every
 # competition's deletion date (created + 60 days, extended a week at a time on
-# the site only) and this tool follows it: a record is bound to a platform
-# competition (PlatformId) and deleted when the platform says so. The row's own
-# DeletionDate is only a cached copy of the platform date — for display and as
-# the last-known date when the platform row has gone missing.
+# the site only) and mirrors it into its `retentionclock` table, the only
+# platform table this tool reads (platform_clock.py). A record is bound to a
+# platform competition (PlatformId, a lowercase GUID) and its data is deleted
+# only on the platform's verdict (deleted / purged). The row's own
+# DeletionDate is just a cached copy of the platform date, for display.
 # ---------------------------------------------------------------------------
 
 def _platform_clock_reader():
     """
-    A `platform_id -> (clock | None, state)` reader that opens the platform
-    registry once (the timer reads many rows). Never raises: failures come
-    back as CLOCK_UNAVAILABLE (logged), a missing PLATFORM_STORAGE_ACCOUNT as
-    CLOCK_OFF.
+    A `platform_id -> (clock | None, state)` reader holding ONE platform
+    table client (build one per request / per sweep) that every read gets as
+    `table_client=`. Never raises: failures come back as CLOCK_UNAVAILABLE
+    (logged), a missing PLATFORM_STORAGE_ACCOUNT as CLOCK_OFF. An id that is
+    not a GUID reads as CLOCK_NOT_FOUND.
     """
     try:
         client = get_platform_table_client()
     except Exception as e:
         reason = type(e).__name__
-        logging.error(f"Platform clock: could not open the platform registry: {reason}")
+        logging.error(f"Platform clock: could not open the platform clock table: {reason}")
         return lambda platform_id: (None, CLOCK_UNBOUND if not platform_id else CLOCK_UNAVAILABLE)
 
     def read(platform_id):
@@ -517,8 +532,11 @@ def _platform_clock_reader():
             return None, CLOCK_UNBOUND
         if client is None:
             return None, CLOCK_OFF
+        guid = normalize_platform_id(platform_id)
+        if guid is None:
+            return None, CLOCK_NOT_FOUND
         try:
-            clock = read_platform_clock(platform_id, table_client=client)
+            clock = read_platform_clock(guid, table_client=client)
         except PlatformClockUnavailable:
             logging.error(f"Platform clock unavailable for platform competition {platform_id}")
             return None, CLOCK_UNAVAILABLE
@@ -869,24 +887,44 @@ def _newest_competition(entities):
     return max(entities, key=lambda e: _parse_iso_utc(e.get("CreatedDate")) or oldest)
 
 
-def find_competition_by_platform_id(comp_table, platform_id):
+def find_competition_by_platform_id(comp_table, platform_id, raw_platform_id=None):
     """
     Find the live competition bound to a platform competition GUID.
 
-    The PlatformId filter runs server-side; `Visible is False` is filtered in
-    Python because legacy rows lack the property altogether (a `Visible eq true`
-    filter would drop them). Soft-deleted rows keep their PlatformId but their
-    blobs are gone, so they must never be resurrected. Newest CreatedDate wins
-    if several visible rows share the id.
+    `platform_id` is the normalized (lowercase) GUID; `raw_platform_id`, the
+    id as the client sent it, is looked up too when it differs, so a record
+    stored under another casing is found rather than duplicated (the match is
+    rewritten to the normalized id). The PlatformId filter runs server-side;
+    `Visible is False` is filtered in Python because legacy rows lack the
+    property altogether (a `Visible eq true` filter would drop them).
+    Soft-deleted rows keep their PlatformId but their blobs are gone, so they
+    must never be resurrected. Newest CreatedDate wins if several visible
+    rows share the id.
     """
-    safe_pid = str(platform_id).replace("'", "''")
-    rows = list(comp_table.query_entities(
-        f"PartitionKey eq 'GLOBAL' and PlatformId eq '{safe_pid}'"
-    ))
+    candidates = [platform_id]
+    if raw_platform_id and raw_platform_id != platform_id:
+        candidates.append(raw_platform_id)
+    rows = []
+    for candidate in candidates:
+        safe_pid = str(candidate).replace("'", "''")
+        rows.extend(comp_table.query_entities(
+            f"PartitionKey eq 'GLOBAL' and PlatformId eq '{safe_pid}'"
+        ))
     visible = [e for e in rows if e.get("Visible") is not False]
     if not visible:
         return None
-    return _newest_competition(visible)
+    entity = _newest_competition(visible)
+    if entity.get("PlatformId") != platform_id:
+        try:
+            comp_table.update_entity({
+                "PartitionKey": "GLOBAL",
+                "RowKey": entity["RowKey"],
+                "PlatformId": platform_id,
+            }, mode=UpdateMode.MERGE)
+            entity["PlatformId"] = platform_id
+        except Exception as e:
+            logging.warning(f"Could not normalize the PlatformId of {entity['RowKey']}: {e}")
+    return entity
 
 
 def adopt_competition_by_name(comp_table, platform_id, name):
@@ -974,7 +1012,7 @@ def _sync_competition_name(comp_table, blob_service_client, entity, name):
 
 
 def resolve_competition_record(comp_table, blob_service_client, platform_id, name, email,
-                               clock=None, clock_state=CLOCK_OK):
+                               clock=None, clock_state=CLOCK_OK, raw_platform_id=None):
     """
     Core of POST /resolve_competition: platform-id lookup (syncing the stored
     Name when the platform competition has been renamed) -> name adoption ->
@@ -988,7 +1026,7 @@ def resolve_competition_record(comp_table, blob_service_client, platform_id, nam
     or can't be read (503). Only CLOCK_OFF (local dev, no registry configured)
     binds without a date. Returns {id, name, created, deletionDate}.
     """
-    entity = find_competition_by_platform_id(comp_table, platform_id)
+    entity = find_competition_by_platform_id(comp_table, platform_id, raw_platform_id)
     if entity is not None:
         result_name = _sync_competition_name(comp_table, blob_service_client, entity, name)
         created = False
@@ -1051,10 +1089,15 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     except ValueError:
         return func.HttpResponse("Invalid JSON body", status_code=400)
 
-    platform_id = (req_body or {}).get('platformId')
+    raw_platform_id = (req_body or {}).get('platformId')
     name = (req_body or {}).get('name')
-    if not platform_id or not isinstance(platform_id, str):
+    if not raw_platform_id or not isinstance(raw_platform_id, str):
         return func.HttpResponse("Missing platformId parameter", status_code=400)
+    # One spelling everywhere (platform read, lookup, store): a differently
+    # cased GUID must never bind a second record.
+    platform_id = normalize_platform_id(raw_platform_id)
+    if not platform_id:
+        return func.HttpResponse("Invalid platformId parameter", status_code=400)
     if not name or not sanitize_name(str(name)):
         return func.HttpResponse("Missing or invalid name parameter", status_code=400)
 
@@ -1082,7 +1125,7 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
         try:
             result = resolve_competition_record(
                 comp_table, blob_service_client, platform_id, str(name), email,
-                clock=clock, clock_state=clock_state,
+                clock=clock, clock_state=clock_state, raw_platform_id=raw_platform_id,
             )
         except _PlatformBindingRefused as refused:
             return func.HttpResponse(refused.message, status_code=refused.status_code)
@@ -1222,14 +1265,16 @@ def _scrub_hidden_rows(comp_table):
 
 def run_auto_deletion(comp_table, now, clock_reader=None):
     """
-    One auto-deletion sweep; the platform decides. A bound row is deleted when
-    `platform_says_delete` (purged, deleted, or its DeletionDate passed) and
-    otherwise only gets the platform date cached. When the platform row is
-    missing, the cached DeletionDate (the last date the platform gave) decides.
-    An unreadable registry, or none configured, skips the row with an error —
-    never delete early. A legacy row without PlatformId is deleted on its
-    stored DeletionDate (LEGACY_DELETION_DATE when it has none); nothing new
-    is written for it. Returns {deleted, skipped, failed, synced}.
+    One auto-deletion sweep; the platform decides. A bound row is deleted
+    only on the platform's verdict (`platform_says_delete`: the competition is
+    deleted or purged) — never on a date, the platform may be in dry-run or an
+    overdue competition may just have been extended — and otherwise gets the
+    platform date cached. A bound row whose clock row is missing is kept (with
+    a warning); an unreadable platform, or none configured, skips the row with
+    an error. A legacy row without PlatformId is deleted on its stored
+    DeletionDate (LEGACY_DELETION_DATE when it has none); nothing new is
+    written for it. One platform table client serves the whole sweep.
+    Returns {deleted, skipped, failed, synced}.
     """
     reader = clock_reader or _platform_clock_reader()
     stats = {"deleted": 0, "skipped": 0, "failed": 0, "synced": 0}
@@ -1255,22 +1300,19 @@ def run_auto_deletion(comp_table, now, clock_reader=None):
                               "platform-bound competitions are skipped")
             continue
 
+        if state == CLOCK_NOT_FOUND:
+            stats["skipped"] += 1
+            logging.warning(f"Auto-deletion: no platform clock row for {comp_id}; kept")
+            continue
+
         if state == CLOCK_OK:
-            expired = platform_says_delete(clock, now)
+            expired = platform_says_delete(clock)
             if not expired and _sync_local_deletion_date(comp_table, entity, clock):
                 stats["synced"] += 1
         else:
-            # CLOCK_NOT_FOUND: the cached platform date. CLOCK_UNBOUND: a
-            # legacy row's stored date. Never delete on an unparseable date.
-            stored = entity.get("DeletionDate")
-            if not stored and state == CLOCK_UNBOUND:
-                stored = LEGACY_DELETION_DATE
-            if not stored:
-                logging.error(f"Auto-deletion: {comp_id} has no platform row and no cached "
-                              "deletion date; skipped")
-                stats["skipped"] += 1
-                continue
-            deletion = _parse_iso_utc(stored)
+            # CLOCK_UNBOUND: a legacy row's stored date (it can't be extended).
+            # Never delete on an unparseable date.
+            deletion = _parse_iso_utc(entity.get("DeletionDate") or LEGACY_DELETION_DATE)
             expired = deletion is not None and deletion <= now
 
         if not expired:
@@ -1285,10 +1327,11 @@ def run_auto_deletion(comp_table, now, clock_reader=None):
     return stats
 
 
-@app.timer_trigger(schedule="0 0 3 * * *", arg_name="timer", run_on_startup=False)
+@app.timer_trigger(schedule="0 0 4 * * *", arg_name="timer", run_on_startup=False)
 def auto_delete_expired_competitions(timer: func.TimerRequest) -> None:
     """
-    Daily sweep (03:00 UTC, the same night as the platform's): delete expired
+    Daily sweep (04:00 UTC, an hour after the platform's 03:00 sweep, so it
+    follows the platform's verdicts the same night): delete expired
     competitions with the same flow as manual deletion (run_auto_deletion),
     then blank leftover addresses on already-deleted rows.
     """
@@ -1302,7 +1345,7 @@ def auto_delete_expired_competitions(timer: func.TimerRequest) -> None:
         stats = run_auto_deletion(comp_table, datetime.now(timezone.utc))
         logging.info(
             f"Auto-deletion sweep complete. Deleted {stats['deleted']}, skipped {stats['skipped']} "
-            f"(platform clock unreadable), failed {stats['failed']}, synced {stats['synced']} date(s).")
+            f"(platform clock unreadable or missing), failed {stats['failed']}, synced {stats['synced']} date(s).")
     except Exception as e:
         logging.error(f"Auto-deletion sweep error: {e}")
 
@@ -2213,7 +2256,14 @@ def download_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
             return _download_error(_DOWNLOAD_EXPIRED, 410)
 
         comp_id = row["PartitionKey"]
-        entity = get_competition_entity(comp_id)
+        # Strict lookup: only a missing or hidden competition is "gone" (410);
+        # a storage failure must stay a retryable 5xx.
+        try:
+            entity = _get_competition_entity_strict(comp_id)
+        except Exception as e:
+            logging.error(f"Download link: could not read competition {comp_id}: {e}")
+            return func.HttpResponse("Temporarily unavailable, try again later", status_code=503,
+                                     headers={"Cache-Control": "no-store", "Retry-After": "60"})
         if not entity or entity.get("Visible") is False:
             return _download_error(_DOWNLOAD_GONE, 410)
 
@@ -2348,15 +2398,16 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
     if not entity:
         return func.HttpResponse("Competition not found", status_code=404)
 
-    platform_id = entity.get("PlatformId")
-    if not platform_id:
+    raw_platform_id = entity.get("PlatformId")
+    if not raw_platform_id:
         return func.HttpResponse(
             "not_bound: this competition is not linked to a platform competition",
             status_code=409)
     # The binding originates from a client body (resolve_competition), so pin it
-    # to a UUID before splicing it into the pool blob path.
-    if not _UUID_RE.fullmatch(platform_id):
-        logging.warning(f"Rejecting non-UUID PlatformId {platform_id!r} on competition {competition}")
+    # to a lowercase GUID before splicing it into the pool blob path.
+    platform_id = normalize_platform_id(raw_platform_id)
+    if not platform_id:
+        logging.warning(f"Rejecting non-UUID PlatformId {raw_platform_id!r} on competition {competition}")
         return func.HttpResponse(
             "not_bound: this competition's platform link is invalid",
             status_code=409)

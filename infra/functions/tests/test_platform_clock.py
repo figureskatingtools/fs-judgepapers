@@ -1,10 +1,10 @@
 """platform_clock.py — the shared module (byte-identical in fs-judgepapers,
-fs-protocolgenerator and fs-scoremodifier) that reads a competition's deletion
-date from the site's platform registry."""
+fs-protocolgenerator and fs-scoremodifier) that reads a competition's
+retention state from the platform's `retentionclock` table."""
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from azure.core.exceptions import HttpResponseError
+from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 
 import platform_clock as pc
 from conftest import PLATFORM_ID, put_platform_competition
@@ -100,14 +100,42 @@ def test_the_local_date_applies_without_a_platform_date():
 @pytest.mark.parametrize("clock, expected", [
     (None, False),
     ({"deletionDate": NOW + timedelta(days=1), "status": "active", "purged": False}, False),
-    ({"deletionDate": NOW, "status": "active", "purged": False}, True),
-    ({"deletionDate": NOW - timedelta(hours=3), "status": "active", "purged": False}, True),
+    # The date alone never authorizes deletion: the platform decides.
+    ({"deletionDate": NOW, "status": "active", "purged": False}, False),
+    ({"deletionDate": NOW - timedelta(days=30), "status": "active", "purged": False}, False),
     ({"deletionDate": NOW + timedelta(days=9), "status": "deleted", "purged": False}, True),
     ({"deletionDate": NOW + timedelta(days=9), "status": "deleted", "purged": True}, True),
-    ({"deletionDate": None, "status": "active", "purged": False}, False),
+    ({"deletionDate": None, "status": "active", "purged": True}, True),
 ])
-def test_platform_says_delete(clock, expected):
-    assert pc.platform_says_delete(clock, NOW) is expected
+def test_platform_says_delete_only_on_the_platforms_verdict(clock, expected):
+    assert pc.platform_says_delete(clock) is expected
+
+
+@pytest.mark.parametrize("value, expected", [
+    (PLATFORM_ID, PLATFORM_ID),
+    (f"  {PLATFORM_ID.upper()} ", PLATFORM_ID),
+    ("not-a-guid", None),
+    ("abc' or 1 eq 1", None),
+    (None, None),
+    ("", None),
+])
+def test_normalize_platform_id(value, expected):
+    assert pc.normalize_platform_id(value) == expected
+
+
+def test_the_tools_read_the_retentionclock_table(monkeypatch):
+    monkeypatch.setenv("PLATFORM_STORAGE_ACCOUNT", "stfsplatexample")
+    monkeypatch.delenv("PLATFORM_CLOCK_TABLE", raising=False)
+    client = pc.get_platform_table_client()
+    assert client.table_name == "retentionclock"
+
+
+def test_a_missing_clock_table_is_unavailable_not_absent(registry):
+    error = ResourceNotFoundError("The table specified does not exist. ErrorCode:TableNotFound")
+    error.error_code = "TableNotFound"
+    registry.fail_get = error
+    with pytest.raises(pc.PlatformClockUnavailable):
+        pc.read_platform_clock(PLATFORM_ID, table_client=registry)
 
 
 def test_to_iso_z():

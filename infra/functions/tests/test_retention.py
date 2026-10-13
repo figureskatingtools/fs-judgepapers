@@ -147,6 +147,41 @@ def test_without_a_registry_configured_resolve_binds_without_a_date(tables, blob
     assert row["PlatformId"] == PLATFORM_ID and "DeletionDate" not in row
 
 
+def test_a_differently_cased_id_finds_the_same_record(tables, blobs, platform):
+    put_competition(tables, platform_id=PLATFORM_ID)
+    put_platform_competition(platform)
+
+    body = payload(resolve(platform_id=f" {PLATFORM_ID.upper()} "))
+
+    assert body["id"] == "abc12345" and body["created"] is False
+    assert len(tables["competitions"].rows) == 1
+
+
+def test_a_record_stored_under_another_casing_is_found_and_normalized(tables, blobs, platform):
+    put_competition(tables, platform_id=PLATFORM_ID.upper())
+    put_platform_competition(platform)
+
+    body = payload(resolve(platform_id=PLATFORM_ID.upper()))
+
+    assert body["id"] == "abc12345" and body["created"] is False
+    assert tables["competitions"].row("GLOBAL", "abc12345")["PlatformId"] == PLATFORM_ID
+
+
+def test_a_new_record_stores_the_normalized_id(tables, blobs, platform):
+    put_platform_competition(platform)
+
+    body = payload(resolve(platform_id=PLATFORM_ID.upper()))
+
+    assert tables["competitions"].row("GLOBAL", body["id"])["PlatformId"] == PLATFORM_ID
+    assert ("get_entity", ("COMPETITION", PLATFORM_ID)) in platform.calls
+
+
+def test_a_platform_id_that_is_not_a_guid_is_rejected(tables, blobs, platform):
+    response = resolve(platform_id="not-a-guid")
+    assert response.status_code == 400
+    assert tables["competitions"].rows == {}
+
+
 def test_no_route_creates_unbound_records_or_extends_dates():
     assert not hasattr(fa, "create_competition")
     assert not hasattr(fa, "extend_competition_deletion")
@@ -215,13 +250,44 @@ def seed(tables, blobs, comp_id, **kwargs):
     return row
 
 
-def test_a_bound_record_is_deleted_when_the_platform_date_passes(tables, blobs, platform, sweep):
-    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW + timedelta(days=20)))
+def test_a_passed_platform_date_alone_never_deletes(tables, blobs, platform, sweep):
+    # The platform may be in dry-run, or the competition was just extended:
+    # only its verdict (deleted / purged) counts.
+    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=3)))
     put_platform_competition(platform, deletion=iso(NOW - timedelta(hours=3)))
+
+    assert sweep()["deleted"] == 0
+    assert stored(tables, "bound001")["Visible"] is True
+
+
+def test_a_bound_record_goes_once_the_platform_has_purged_it(tables, blobs, platform, sweep):
+    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW + timedelta(days=20)))
+    put_platform_competition(platform, deletion=iso(NOW - timedelta(hours=3)), status="deleted",
+                             purged=iso(NOW - timedelta(hours=1)))
 
     assert sweep()["deleted"] == 1
     assert stored(tables, "bound001")["Visible"] is False
     assert not any(name.startswith("Cup bound001-") for name in blobs.blobs)
+
+
+def test_the_sweep_reads_the_platform_with_one_client(tables, blobs, monkeypatch, platform):
+    opened = []
+    monkeypatch.setattr(fa, "get_platform_table_client", lambda: opened.append(1) or platform)
+    other = "11111111-2222-4333-8444-555555555555"
+    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID)
+    seed(tables, blobs, "bound002", platform_id=other)
+    put_platform_competition(platform)
+    put_platform_competition(platform, platform_id=other)
+
+    fa.run_auto_deletion(tables["competitions"], NOW)
+
+    assert len(opened) == 1
+    assert len([c for c in platform.calls if c[0] == "get_entity"]) == 2
+
+
+def test_the_timer_runs_after_the_platform_sweep():
+    bindings = fa.auto_delete_expired_competitions._function.get_bindings()
+    assert bindings[0].schedule == "0 0 4 * * *"
 
 
 def test_the_platform_date_keeps_a_bound_record_past_its_cached_date(tables, blobs, platform, sweep):
@@ -293,18 +359,25 @@ def test_without_a_registry_configured_bound_rows_are_skipped(tables, blobs, cap
     assert len(errors) == 1
 
 
-def test_a_missing_platform_row_falls_back_to_the_cached_date(tables, blobs, platform, sweep):
-    seed(tables, blobs, "expired1", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=1)))
-    other = "11111111-2222-4333-8444-555555555555"
-    seed(tables, blobs, "current1", platform_id=other, deletion=iso(NOW + timedelta(days=1)))
+def test_a_missing_clock_row_keeps_the_record(tables, blobs, platform, sweep, caplog):
+    # No date-based deletion without the platform: a missing row is kept.
+    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=9)))
+    seed(tables, blobs, "bound002", platform_id=PLATFORM_ID.upper(), deletion=None)
 
-    assert sweep()["deleted"] == 1
-    assert stored(tables, "expired1")["Visible"] is False
-    assert stored(tables, "current1")["Visible"] is True
+    with caplog.at_level(logging.WARNING):
+        stats = sweep()
+
+    assert stats["deleted"] == 0 and stats["skipped"] == 2
+    assert stored(tables, "bound001")["Visible"] is True
+    assert any("bound001" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
 
 
-def test_a_missing_platform_row_and_no_cached_date_is_skipped(tables, blobs, platform, sweep):
-    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=None)
+def test_a_missing_clock_table_skips_bound_rows(tables, blobs, platform, sweep):
+    from azure.core.exceptions import ResourceNotFoundError
+    error = ResourceNotFoundError("ErrorCode:TableNotFound")
+    error.error_code = "TableNotFound"
+    platform.fail_get = error
+    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=9)))
 
     stats = sweep()
 
