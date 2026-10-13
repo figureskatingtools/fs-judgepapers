@@ -19,6 +19,7 @@ A web application for generating judging packets for figure skating competitions
 1. **Upload** — Source PDF files are uploaded via the web UI to Azure Blob Storage
 2. **Process** — Azure Function splits judge sheets, creates cover pages, and merges documents into per-judge packets
 3. **Download** — Generated packets are stored in Blob Storage with SAS-linked download URLs
+4. **Send** — A merged judges'-papers PDF can be e-mailed (via Mailgun) to e.g. the competition manager: a predefined Finnish or English message with a 5-day download link on figureskatingtools.com (it redirects to the PDF, so no storage URL appears in the mail), CC'd to the Results Service e-mail
 
 ### Authentication
 
@@ -83,7 +84,8 @@ Keys are category abbreviations, values `ISU` or `MUPI`; only deviations from th
 ### 1. Infrastructure
 
 ```bash
-./deploy_infra.sh [--proxy-secret <SECRET>]
+read -rs MAILGUN_API_KEY && export MAILGUN_API_KEY   # optional, kept out of argv
+./deploy_infra.sh [--proxy-secret <SECRET>] [--example-video-url <URL>]
 ```
 
 Deploys Azure resources (Resource Group, Storage Account, Function App, Application Insights, RBAC) using Bicep. No Web App, DNS or custom domain is created here — hosting and the domain belong to the figureskatingtools-site repo.
@@ -112,6 +114,11 @@ Deployed from the figureskatingtools-site repo, not from here.
       }
     }
     ```
+    Optional: `MAILGUN_API_KEY` (without it `send_judge_papers` only logs the
+    subject and recipients instead of sending — the body isn't logged because
+    it holds a live download link; use the send dialog's Preview to see it), `EXAMPLE_VIDEO_URL`, and the
+    `MAILGUN_API_BASE` / `MAILGUN_DOMAIN` / `EMAIL_FROM_ADDRESS` overrides (see
+    `infra/functions/email_sender.py`).
 
 2. **Backend:**
     ```bash

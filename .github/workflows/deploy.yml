@@ -81,6 +81,9 @@ jobs:
               proxySharedSecret="${{ secrets.PROXY_SHARED_SECRET }}" \
               platformStorageAccountName="${{ vars.PLATFORM_STORAGE_ACCOUNT }}" \
               platformDataContainerName="${{ vars.PLATFORM_DATA_CONTAINER || 'competition-data' }}" \
+              mailgunApiKey="${{ secrets.MAILGUN_API_KEY }}" \
+              exampleVideoUrl="${{ vars.EXAMPLE_VIDEO_URL }}" \
+              publicBaseUrl="${{ needs.set-environment.outputs.env_name == 'prod' && 'https://figureskatingtools.com' || 'https://test.figureskatingtools.com' }}" \
             --query 'properties.outputs' \
             -o json)
 

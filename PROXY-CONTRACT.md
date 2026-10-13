@@ -79,6 +79,14 @@ Every endpoint must call `get_user_email_from_header(req)` and return **401**
 when it returns `None`. `is_user_allowed(email)` is the (currently
 allow-everyone) authorization hook layered on top.
 
+**One exception: `GET download_judge_papers`.** It serves the link e-mailed by
+`send_judge_papers` (`https://figureskatingtools.com/judgepapers/download?t=<token>`),
+and the recipient isn't signed in. The router proxies that exact public path
+(excluded from Easy Auth) to `/api/download_judge_papers?t=<token>` without a
+user header; the endpoint still checks the shared secret with `_proxy_secret_ok()`
+(401), then resolves the 32-character token against the `sentemails` table and
+answers `302` to a 15-minute read SAS (404 unknown, 410 expired).
+
 ## Local testing
 
 `func start` from `infra/functions/` serves the same routes on
