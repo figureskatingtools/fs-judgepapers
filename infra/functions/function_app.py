@@ -1045,17 +1045,18 @@ def _delete_competition_data(entity, deleted_by):
     except Exception as table_err:
         logging.warning(f"Error deleting table entities: {table_err}")
 
-    # Delete the send-e-mail audit rows (they hold recipient addresses)
+    # Delete the send-e-mail audit rows. They hold recipient addresses, so a
+    # failure must abort before the soft-delete below: a hidden competition is
+    # never cleaned up again, and the caller (or the timer) can simply retry.
+    sent_table = get_table_client("sentemails")
+    if not sent_table:
+        raise RuntimeError("Storage configuration invalid")
     try:
-        sent_table = get_table_client("sentemails")
-        if sent_table:
-            safe_pk = comp_id.replace("'", "''")
-            for row in sent_table.query_entities(f"PartitionKey eq '{safe_pk}'"):
-                sent_table.delete_entity(partition_key=row['PartitionKey'], row_key=row['RowKey'])
+        safe_pk = comp_id.replace("'", "''")
+        for row in sent_table.query_entities(f"PartitionKey eq '{safe_pk}'"):
+            sent_table.delete_entity(partition_key=row['PartitionKey'], row_key=row['RowKey'])
     except ResourceNotFoundError:
-        pass
-    except Exception as sent_err:
-        logging.warning(f"Error deleting sent-email rows: {sent_err}")
+        pass  # the table doesn't exist yet: nothing was ever sent
 
     # Keep the competitions row as permanent history: hide it and record the deletion
     comp_table = get_table_client("competitions")
@@ -1934,21 +1935,12 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse("Generated file not found", status_code=404)
 
         sent_table = get_table_client("sentemails")
-        if sent_table:
-            try:
-                sent_table.create_table()
-            except Exception:
-                pass
-            try:
-                if _sends_in_last_day(sent_table, email) >= SEND_RATE_LIMIT_PER_DAY:
-                    return func.HttpResponse(
-                        f"Daily limit of {SEND_RATE_LIMIT_PER_DAY} e-mails reached, try again later",
-                        status_code=429)
-            except Exception as e:
-                logging.warning(f"Send rate-limit check failed, allowing the send: {e}")
-
         if not sent_table:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
+        try:
+            sent_table.create_table()
+        except Exception:
+            pass
 
         # The audit row doubles as the download link: its RowKey is the token
         # download_judge_papers resolves, so it is written before sending.
@@ -1968,6 +1960,25 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
             "MailgunId": "",
             "DryRun": False,
         })
+
+        # Count after writing our own row, so concurrent sends all see each
+        # other and can't overshoot the limit (under contention they may both
+        # be refused, never both allowed). Fails closed.
+        try:
+            over_limit = _sends_in_last_day(sent_table, email) > SEND_RATE_LIMIT_PER_DAY
+        except Exception as e:
+            logging.error(f"Send rate-limit check failed: {e}")
+            over_limit = None
+        if over_limit is not False:
+            try:
+                sent_table.delete_entity(partition_key=comp_id, row_key=token)
+            except Exception as de:
+                logging.warning(f"Failed to remove the refused e-mail's link row: {de}")
+            if over_limit is None:
+                return func.HttpResponse("Could not check the sending limit, try again later", status_code=503)
+            return func.HttpResponse(
+                f"Daily limit of {SEND_RATE_LIMIT_PER_DAY} e-mails reached, try again later",
+                status_code=429)
 
         message = email_sender.build_message(
             language, to, results_service_email, ctx["senderName"], url, expiry)

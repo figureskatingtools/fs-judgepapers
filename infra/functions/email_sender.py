@@ -47,7 +47,7 @@ _SENDER_NAME_FORBIDDEN = set('/:@<>\\"')
 # Pragmatic single-address check (ASCII only, no quoted local parts, no IP
 # literals); the frontend uses the same pattern.
 _EMAIL_RE = re.compile(
-    r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+"
+    r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
     r"@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$"
 )
 
@@ -273,8 +273,9 @@ def send_message(msg, tag="judgepapers"):
     raw = msg.as_bytes(policy=policy.SMTP)
     api_key = os.environ.get("MAILGUN_API_KEY", "").strip()
     if not api_key:
-        logging.warning("MAILGUN_API_KEY not set: dry run, message not sent:\n"
-                        + raw.decode("ascii", errors="replace"))
+        # Headers only: the body carries a live download link.
+        logging.warning("MAILGUN_API_KEY not set: dry run, message not sent. "
+                        f"Subject: {msg['Subject']} | To: {msg['To']} | Cc: {msg['Cc']}")
         return {"id": None, "dryRun": True}
 
     api_base = (os.environ.get("MAILGUN_API_BASE") or DEFAULT_API_BASE).rstrip("/")

@@ -84,7 +84,8 @@ Keys are category abbreviations, values `ISU` or `MUPI`; only deviations from th
 ### 1. Infrastructure
 
 ```bash
-./deploy_infra.sh [--proxy-secret <SECRET>] [--mailgun-api-key <KEY>] [--example-video-url <URL>]
+read -rs MAILGUN_API_KEY && export MAILGUN_API_KEY   # optional, kept out of argv
+./deploy_infra.sh [--proxy-secret <SECRET>] [--example-video-url <URL>]
 ```
 
 Deploys Azure resources (Resource Group, Storage Account, Function App, Application Insights, RBAC) using Bicep. No Web App, DNS or custom domain is created here — hosting and the domain belong to the figureskatingtools-site repo.
@@ -114,7 +115,8 @@ Deployed from the figureskatingtools-site repo, not from here.
     }
     ```
     Optional: `MAILGUN_API_KEY` (without it `send_judge_papers` only logs the
-    MIME message instead of sending it), `EXAMPLE_VIDEO_URL`, and the
+    subject and recipients instead of sending — the body isn't logged because
+    it holds a live download link; use the send dialog's Preview to see it), `EXAMPLE_VIDEO_URL`, and the
     `MAILGUN_API_BASE` / `MAILGUN_DOMAIN` / `EMAIL_FROM_ADDRESS` overrides (see
     `infra/functions/email_sender.py`).
 
