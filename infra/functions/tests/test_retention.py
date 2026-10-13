@@ -1,4 +1,4 @@
-"""Retention follows the platform clock: resolve, details, extend, the nightly
+"""Retention is the platform's alone: resolve, details, the nightly
 auto-deletion and the e-mail scrubbing of deleted rows."""
 import logging
 from datetime import datetime, timedelta, timezone
@@ -25,11 +25,6 @@ def iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def future(days):
-    return iso(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-               + timedelta(days=days))
-
-
 def resolve(name="Spring Cup", platform_id=PLATFORM_ID):
     return call(fa.resolve_competition, make_request(
         "POST", body={"platformId": platform_id, "name": name}))
@@ -50,20 +45,30 @@ def test_resolve_syncs_the_bound_record_to_the_platform_date(tables, blobs, plat
 
     body = payload(resolve())
 
-    assert body["id"] == "abc12345"
-    assert body["deletionDate"] == "2026-12-01T00:00:00Z"
-    assert body["retentionManagedBy"] == "platform"
+    assert body == {"id": "abc12345", "name": "Spring Cup", "created": False,
+                    "deletionDate": "2026-12-01T00:00:00Z"}
     assert tables["competitions"].row("GLOBAL", "abc12345")["DeletionDate"] == "2026-12-01T00:00:00Z"
 
 
-def test_a_new_record_gets_the_platform_date_not_its_own_60_days(tables, blobs, platform):
+def test_a_new_record_gets_the_platform_date_and_no_clock_of_its_own(tables, blobs, platform):
     put_platform_competition(platform, deletion="2026-11-20T00:00:00Z")
 
     body = payload(resolve())
 
     assert body["created"] is True
     assert body["deletionDate"] == "2026-11-20T00:00:00Z"
-    assert tables["competitions"].row("GLOBAL", body["id"])["DeletionDate"] == "2026-11-20T00:00:00Z"
+    row = tables["competitions"].row("GLOBAL", body["id"])
+    assert row["DeletionDate"] == "2026-11-20T00:00:00Z"
+    assert row["PlatformId"] == PLATFORM_ID
+
+
+def test_a_new_record_before_the_platform_has_a_date_gets_none(tables, blobs, platform):
+    put_platform_competition(platform, deletion=None)
+
+    body = payload(resolve())
+
+    assert body["deletionDate"] is None
+    assert "DeletionDate" not in tables["competitions"].row("GLOBAL", body["id"])
 
 
 def test_an_adopted_record_is_synced_too(tables, blobs, platform):
@@ -91,7 +96,8 @@ def test_resolve_refuses_a_deleted_platform_competition(tables, blobs, platform,
     assert blobs.blobs == {}
 
 
-def test_resolve_works_on_the_local_date_when_the_platform_is_unreachable(tables, blobs, platform, caplog):
+def test_an_existing_record_resolves_on_its_cached_date_when_the_platform_is_unreachable(
+        tables, blobs, platform, caplog):
     put_competition(tables, platform_id=PLATFORM_ID, deletion="2026-11-01T10:00:00Z")
     platform.fail_get = HttpResponseError("throttled")
 
@@ -99,29 +105,53 @@ def test_resolve_works_on_the_local_date_when_the_platform_is_unreachable(tables
         response = resolve()
 
     assert response.status_code == 200
-    body = payload(response)
-    assert body["deletionDate"] == "2026-11-01T10:00:00Z"
-    assert body["retentionManagedBy"] == "platform"
+    assert payload(response)["deletionDate"] == "2026-11-01T10:00:00Z"
     assert tables["competitions"].row("GLOBAL", "abc12345")["DeletionDate"] == "2026-11-01T10:00:00Z"
     assert any("unavailable" in r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR)
 
 
-def test_resolve_keeps_the_tool_clock_when_the_feature_is_off(tables, blobs):
+def test_no_new_binding_while_the_platform_is_unreachable(tables, blobs, platform):
+    put_competition(tables, name="Spring Cup")  # an unbound row it could adopt
+    platform.fail_get = HttpResponseError("throttled")
+
+    response = resolve()
+
+    assert response.status_code == 503
+    assert text(response).startswith("platform_unavailable")
+    assert "PlatformId" not in tables["competitions"].row("GLOBAL", "abc12345")
+    assert len(tables["competitions"].rows) == 1
+
+
+def test_no_new_binding_to_a_platform_competition_that_does_not_exist(tables, blobs, platform):
+    response = resolve()
+
+    assert response.status_code == 404
+    assert text(response).startswith("platform_not_found")
+    assert tables["competitions"].rows == {}
+
+
+def test_an_existing_record_whose_platform_row_is_missing_keeps_its_cached_date(tables, blobs, platform):
     put_competition(tables, platform_id=PLATFORM_ID, deletion="2026-11-01T10:00:00Z")
 
     body = payload(resolve())
 
     assert body["deletionDate"] == "2026-11-01T10:00:00Z"
-    assert body["retentionManagedBy"] == "tool"
 
 
-def test_resolve_keeps_the_local_date_when_the_platform_row_is_missing(tables, blobs, platform):
-    put_competition(tables, platform_id=PLATFORM_ID, deletion="2026-11-01T10:00:00Z")
-
+def test_without_a_registry_configured_resolve_binds_without_a_date(tables, blobs):
+    # Local development: PLATFORM_STORAGE_ACCOUNT unset.
     body = payload(resolve())
 
-    assert body["deletionDate"] == "2026-11-01T10:00:00Z"
-    assert body["retentionManagedBy"] == "tool"
+    assert body["created"] is True and body["deletionDate"] is None
+    row = tables["competitions"].row("GLOBAL", body["id"])
+    assert row["PlatformId"] == PLATFORM_ID and "DeletionDate" not in row
+
+
+def test_no_route_creates_unbound_records_or_extends_dates():
+    assert not hasattr(fa, "create_competition")
+    assert not hasattr(fa, "extend_competition_deletion")
+    with pytest.raises(ValueError):
+        fa.create_competition_record(None, None, "Cup", USER_EMAIL, None)
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +168,7 @@ def no_categories(monkeypatch):
     monkeypatch.setattr(fa, "_get_categories", lambda: [])
 
 
-def test_details_report_the_platform_date_and_who_manages_it(tables, blobs, platform, no_categories):
+def test_details_report_the_platform_date(tables, blobs, platform, no_categories):
     row = put_competition(tables, platform_id=PLATFORM_ID, deletion="2026-11-01T10:00:00Z")
     add_metadata(blobs, row)
     put_platform_competition(platform, deletion="2026-12-01T00:00:00Z")
@@ -149,84 +179,18 @@ def test_details_report_the_platform_date_and_who_manages_it(tables, blobs, plat
     body = details()
 
     assert body["deletionDate"] == "2026-12-01T00:00:00Z"
-    assert body["retentionManagedBy"] == "platform"
+    assert "retentionManagedBy" not in body
     assert tables["competitions"].row("GLOBAL", "abc12345")["DeletionDate"] == "2026-12-01T00:00:00Z"
 
 
-def test_details_of_an_unbound_record_report_the_tool_clock(tables, blobs, no_categories):
-    row = put_competition(tables, deletion="2026-11-01T10:00:00Z")
+def test_details_fall_back_to_the_cached_date(tables, blobs, platform, no_categories):
+    row = put_competition(tables, platform_id=PLATFORM_ID, deletion="2026-11-01T10:00:00Z")
     add_metadata(blobs, row)
+    platform.fail_get = HttpResponseError("throttled")
     tables["generatedpapers"].put(PartitionKey="abc12345", RowKey="judgingpapers_2026-11-01.pdf",
                                   FileName="judgingpapers_2026-11-01.pdf", Url="https://x")
 
-    body = details()
-
-    assert body["deletionDate"] == "2026-11-01T10:00:00Z"
-    assert body["retentionManagedBy"] == "tool"
-
-
-# ---------------------------------------------------------------------------
-# extend_competition_deletion
-# ---------------------------------------------------------------------------
-
-def extend(comp_id="abc12345"):
-    return call(fa.extend_competition_deletion,
-                make_request("POST", params={"id": comp_id}))
-
-
-def test_extend_of_a_bound_record_only_syncs_the_platform_date(tables, platform):
-    put_competition(tables, platform_id=PLATFORM_ID, deletion="2026-11-01T10:00:00Z")
-    put_platform_competition(platform, deletion=future(30))
-
-    body = payload(extend())
-
-    assert body == {"deletionDate": future(30), "retentionManagedBy": "platform"}
-    assert tables["competitions"].row("GLOBAL", "abc12345")["DeletionDate"] == future(30)
-
-
-def test_extend_of_an_unbound_record_adds_a_week(tables):
-    start = datetime.now(timezone.utc) + timedelta(days=10)
-    put_competition(tables, deletion=start.replace(tzinfo=None).isoformat() + "Z")
-
-    body = payload(extend())
-
-    new = fa._parse_iso_utc(body["deletionDate"])
-    assert new == start + timedelta(days=7)
-    assert body["retentionManagedBy"] == "tool"
-
-
-def test_extend_falls_back_to_a_week_when_the_platform_row_is_missing(tables, platform):
-    start = datetime.now(timezone.utc) + timedelta(days=10)
-    put_competition(tables, platform_id=PLATFORM_ID,
-                    deletion=start.replace(tzinfo=None).isoformat() + "Z")
-
-    body = payload(extend())
-
-    assert fa._parse_iso_utc(body["deletionDate"]) == start + timedelta(days=7)
-
-
-def test_extend_of_a_bound_record_extends_the_local_fallback_when_the_platform_is_unreachable(
-        tables, platform):
-    # Before the site grants the table role (or during an outage) the tool's
-    # Extend button keeps working; the next successful read syncs the date back.
-    start = datetime.now(timezone.utc) + timedelta(days=10)
-    put_competition(tables, platform_id=PLATFORM_ID,
-                    deletion=start.replace(tzinfo=None).isoformat() + "Z")
-    platform.fail_get = HttpResponseError("forbidden")
-
-    response = extend()
-
-    assert response.status_code == 200
-    body = payload(response)
-    assert fa._parse_iso_utc(body["deletionDate"]) == start + timedelta(days=7)
-    assert body["retentionManagedBy"] == "platform"
-
-
-def test_extend_of_a_deleted_platform_competition_is_410(tables, platform):
-    put_competition(tables, platform_id=PLATFORM_ID)
-    put_platform_competition(platform, status="deleted")
-
-    assert extend().status_code == 410
+    assert details()["deletionDate"] == "2026-11-01T10:00:00Z"
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +224,7 @@ def test_a_bound_record_is_deleted_when_the_platform_date_passes(tables, blobs, 
     assert not any(name.startswith("Cup bound001-") for name in blobs.blobs)
 
 
-def test_the_platform_date_keeps_a_bound_record_past_its_local_date(tables, blobs, platform, sweep):
+def test_the_platform_date_keeps_a_bound_record_past_its_cached_date(tables, blobs, platform, sweep):
     seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=2)))
     put_platform_competition(platform, deletion=iso(NOW + timedelta(days=5)))
 
@@ -281,6 +245,16 @@ def test_a_deleted_or_purged_platform_competition_is_deleted_at_once(tables, blo
     assert stored(tables, "bound001")["Visible"] is False
 
 
+def test_a_platform_row_without_a_date_yet_keeps_the_record(tables, blobs, platform, sweep):
+    # No clock of the tool's own: the cached date doesn't decide while the
+    # platform row exists (the platform backfills its date nightly).
+    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=1)))
+    put_platform_competition(platform, deletion=None)
+
+    assert sweep()["deleted"] == 0
+    assert stored(tables, "bound001")["Visible"] is True
+
+
 def test_an_unreachable_platform_never_deletes_early(tables, blobs, platform, sweep, caplog):
     seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=2)))
     platform.fail_get = HttpResponseError("throttled")
@@ -298,16 +272,28 @@ def test_a_registry_that_cannot_even_be_opened_skips_bound_rows(tables, blobs, m
         raise ValueError("no credential")
     monkeypatch.setattr(fa, "get_platform_table_client", broken)
     seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=2)))
-    seed(tables, blobs, "local001", deletion=iso(NOW - timedelta(days=2)))
+    seed(tables, blobs, "legacy01", deletion=iso(NOW - timedelta(days=2)))
 
     stats = fa.run_auto_deletion(tables["competitions"], NOW)
 
     assert stats["skipped"] == 1 and stats["deleted"] == 1
     assert stored(tables, "bound001")["Visible"] is True
-    assert stored(tables, "local001")["Visible"] is False
+    assert stored(tables, "legacy01")["Visible"] is False
 
 
-def test_a_missing_platform_row_falls_back_to_the_local_date(tables, blobs, platform, sweep):
+def test_without_a_registry_configured_bound_rows_are_skipped(tables, blobs, caplog):
+    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=2)))
+    seed(tables, blobs, "bound002", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=2)))
+
+    with caplog.at_level(logging.ERROR):
+        stats = fa.run_auto_deletion(tables["competitions"], NOW)
+
+    assert stats["skipped"] == 2 and stats["deleted"] == 0
+    errors = [r for r in caplog.records if "PLATFORM_STORAGE_ACCOUNT" in r.getMessage()]
+    assert len(errors) == 1
+
+
+def test_a_missing_platform_row_falls_back_to_the_cached_date(tables, blobs, platform, sweep):
     seed(tables, blobs, "expired1", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=1)))
     other = "11111111-2222-4333-8444-555555555555"
     seed(tables, blobs, "current1", platform_id=other, deletion=iso(NOW + timedelta(days=1)))
@@ -317,24 +303,29 @@ def test_a_missing_platform_row_falls_back_to_the_local_date(tables, blobs, plat
     assert stored(tables, "current1")["Visible"] is True
 
 
-def test_a_platform_row_without_a_date_yet_falls_back_to_the_local_date(tables, blobs, platform, sweep):
-    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=1)))
-    put_platform_competition(platform, deletion=None)
+def test_a_missing_platform_row_and_no_cached_date_is_skipped(tables, blobs, platform, sweep):
+    seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=None)
 
-    assert sweep()["deleted"] == 1
+    stats = sweep()
+
+    assert stats["skipped"] == 1 and stats["deleted"] == 0
 
 
-def test_unbound_records_keep_the_local_60_day_clock(tables, blobs, platform, sweep):
+def test_legacy_unbound_rows_go_on_their_stored_date_and_get_nothing_new(tables, blobs, platform, sweep):
     seed(tables, blobs, "old00001", deletion=iso(NOW - timedelta(minutes=1)))
     seed(tables, blobs, "new00001", deletion=iso(NOW + timedelta(days=59)))
+    seed(tables, blobs, "nodate01", deletion=None)  # never got a date: the legacy one applies
 
-    assert sweep()["deleted"] == 1
+    assert sweep()["deleted"] == 2
     assert stored(tables, "old00001")["Visible"] is False
+    assert stored(tables, "nodate01")["Visible"] is False
     assert stored(tables, "new00001")["Visible"] is True
+    assert stored(tables, "new00001")["DeletionDate"] == iso(NOW + timedelta(days=59))
+    assert not [c for c in tables["competitions"].updates() if c[1][1] == "new00001"]
     assert platform.calls == []
 
 
-def test_the_sweep_ignores_hidden_and_legacy_rows(tables, blobs, platform, sweep):
+def test_the_sweep_ignores_hidden_and_legacy_name_keyed_rows(tables, blobs, platform, sweep):
     seed(tables, blobs, "hidden01", deletion=iso(NOW - timedelta(days=9)), visible=False)
     tables["competitions"].put(PartitionKey="GLOBAL", RowKey="Legacy name", Name="Legacy name")
 

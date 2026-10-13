@@ -91,9 +91,10 @@ def put_competition(tables, comp_id="abc12345", name="Spring Cup", platform_id=N
         "Visible": visible,
         "CreatedBy": created_by,
         "CreatedDate": "2026-09-01T10:00:00Z",
-        "DeletionDate": deletion,
         **extra,
     }
+    if deletion is not None:
+        row["DeletionDate"] = deletion
     if platform_id:
         row["PlatformId"] = platform_id
     return tables["competitions"].put(**row)

@@ -77,7 +77,7 @@ def test_a_deleted_platform_competition_cannot_be_sent(sendable, platform):
     assert send().status_code == 410
 
 
-def test_an_unreachable_platform_falls_back_to_the_local_cap(sendable, platform):
+def test_an_unreachable_platform_falls_back_to_the_cached_date(sendable, platform):
     local = from_now(days=1).replace(microsecond=0)
     sendable(platform_id=PLATFORM_ID, deletion=iso(local))
     platform.fail_get = HttpResponseError("throttled")
@@ -87,7 +87,7 @@ def test_an_unreachable_platform_falls_back_to_the_local_cap(sendable, platform)
     assert body["expiryDate"] == iso(local)
 
 
-def test_an_unbound_record_keeps_the_five_day_link(sendable):
+def test_a_far_deletion_date_keeps_the_five_day_link(sendable):
     sendable(deletion=iso(from_now(days=30)))
 
     expiry = fa._parse_iso_utc(payload(send())["expiryDate"])
