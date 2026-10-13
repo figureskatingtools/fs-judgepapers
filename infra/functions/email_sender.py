@@ -3,13 +3,12 @@
 Mailgun HTTP call.
 
 The MIME message is built here with the stdlib `email` package rather than
-letting Mailgun assemble it, so the encoding is deterministic and visible in
-dry-run logs: non-ASCII headers (the emoji subject, a sender name with ä/ö)
+letting Mailgun assemble it, so the encoding is deterministic: non-ASCII headers (the emoji subject, a sender name with ä/ö)
 come out RFC 2047 encoded, both body parts are UTF-8 quoted-printable. It is
 posted to Mailgun's `messages.mime` endpoint as-is.
 
 Configuration (app settings):
-- MAILGUN_API_KEY     domain sending key; unset → dry run (MIME is logged, nothing sent)
+- MAILGUN_API_KEY     domain sending key; unset → dry run (subject + recipient count logged, nothing sent)
 - MAILGUN_API_BASE    regional API base (default: EU, https://api.eu.mailgun.net)
 - MAILGUN_DOMAIN      Mailgun sending domain (default: figureskatingtools.com)
 - EMAIL_FROM_ADDRESS  From address (default: no-reply@figureskatingtools.com)
@@ -51,6 +50,12 @@ _EMAIL_RE = re.compile(
     r"@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$"
 )
 
+# The site's privacy notice, linked from every mail's footer.
+PRIVACY_NOTICE_URLS = {
+    "fi": "https://figureskatingtools.com/tietosuoja/",
+    "en": "https://figureskatingtools.com/privacy/",
+}
+
 _HELSINKI = ZoneInfo("Europe/Helsinki")
 _EN_MONTHS = ("January", "February", "March", "April", "May", "June", "July",
               "August", "September", "October", "November", "December")
@@ -80,6 +85,7 @@ Tulospalvelu
 
 ---
 Sent from Figureskatingtools.com - Supporting Figure Skating Community ❤️
+Tietosuojaseloste: {{privacyUrl}}
 """,
     },
     "en": {
@@ -103,6 +109,7 @@ Results Service
 
 ---
 Sent from Figureskatingtools.com - Supporting Figure Skating Community ❤️
+Privacy notice: {{privacyUrl}}
 """,
     },
 }
@@ -185,6 +192,8 @@ def _render(language, values):
     if values["exampleVideoUrl"]:
         html_values["exampleVideoUrl"] = (
             f'<a href="{html.escape(values["exampleVideoUrl"])}">{html.escape(values["exampleVideoUrl"])}</a>')
+    html_values["privacyUrl"] = (
+        f'<a href="{html.escape(values["privacyUrl"])}">{html.escape(values["privacyUrl"])}</a>')
     html_values["judgePapersUrl"] = (
         f'<a href="{html.escape(values["judgePapersUrl"])}">{html.escape(template["linkText"])}</a>')
 
@@ -222,6 +231,7 @@ def _render_for(language, sender_name, judge_papers_url, expiry):
         "exampleVideoUrl": example_video_url(),
         "judgePapersUrl": judge_papers_url,
         "senderName": sender_name,
+        "privacyUrl": PRIVACY_NOTICE_URLS[language],
     })
 
 
@@ -273,9 +283,11 @@ def send_message(msg, tag="judgepapers"):
     raw = msg.as_bytes(policy=policy.SMTP)
     api_key = os.environ.get("MAILGUN_API_KEY", "").strip()
     if not api_key:
-        # Headers only: the body carries a live download link.
+        # Subject and recipient count only: the body carries a live download
+        # link, and addresses don't belong in logs.
+        recipient_count = sum(len(msg[header].addresses) for header in ("To", "Cc") if msg[header])
         logging.warning("MAILGUN_API_KEY not set: dry run, message not sent. "
-                        f"Subject: {msg['Subject']} | To: {msg['To']} | Cc: {msg['Cc']}")
+                        f"Subject: {msg['Subject']} | {recipient_count} recipient(s)")
         return {"id": None, "dryRun": True}
 
     api_base = (os.environ.get("MAILGUN_API_BASE") or DEFAULT_API_BASE).rstrip("/")

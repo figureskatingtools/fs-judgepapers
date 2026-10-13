@@ -136,14 +136,13 @@ def merge_pdfs(output_path, file_list):
                 reader = PdfReader(file_path)
                 for page in reader.pages:
                     writer.add_page(page)
-                print(f"  Added: {os.path.basename(file_path)}")
             except Exception as e:
-                print(f"  Error adding {os.path.basename(file_path)}: {e}")
+                print(f"  Error adding a file to the merge: {type(e).__name__}")
         else:
-            print(f"  Warning: File not found: {file_path}")
+            print("  Warning: a file to merge was not found")
             
     with open(output_path, "wb") as f:
         writer.write(f)
-    print(f"Created: {output_path}")
+    print(f"Created a merged PDF ({len(writer.pages)} pages)")
     # Page count of the merged PDF — used by the processor for usage statistics.
     return len(writer.pages)

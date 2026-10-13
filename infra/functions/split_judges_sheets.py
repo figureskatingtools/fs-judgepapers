@@ -233,7 +233,7 @@ def split_pdf(pdf_path):
             name = withdrawn_name_from_page(text) or competitor_name
             if name and name not in withdrawn_competitors:
                 withdrawn_competitors.append(name)
-            print(f"  Skipping page {i+1}: Withdrawn competitor '{name}'")
+            print(f"  Skipping page {i+1}: withdrawn competitor")
             continue  # Skip this page entirely
         
         found_judge_on_page = False
@@ -252,7 +252,7 @@ def split_pdf(pdf_path):
                         current_pages = []
                     
                     current_judge_key = key
-                    print(f"Found new judge section: {role} {name} starting at page {i+1}")
+                    print(f"Found new judge section: {role} starting at page {i+1}")
                 
                 found_judge_on_page = True
                 break # Stop scanning lines on this page once judge is found
@@ -274,7 +274,7 @@ def split_pdf(pdf_path):
         print("No pages were saved.")
     
     if withdrawn_competitors:
-        print(f"  Withdrawn competitors: {', '.join(withdrawn_competitors)}")
+        print(f"  Withdrawn competitors: {len(withdrawn_competitors)}")
     
     return withdrawn_competitors
 
@@ -293,4 +293,4 @@ def save_pages(pages, judge_key, base_name, output_dir):
         
     with open(filepath, "wb") as f:
         writer.write(f)
-    print(f"Saved {filepath} ({len(pages)} pages)")
+    print(f"Saved a {role} sheet ({len(pages)} pages)")
