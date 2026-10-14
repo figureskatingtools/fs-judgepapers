@@ -34,7 +34,8 @@ cd "$BUILD_DIR"
 
 # Cleanup - remove dev/test files and artifacts
 rm -rf .venv __pycache__ .git .vscode *.pyc local.settings.json
-rm -f test_*.py
+rm -f test_*.py requirements-dev.txt
+rm -rf tests .pytest_cache
 
 # Install dependencies specifically for Flex Consumption
 echo "Installing dependencies to .python_packages..."

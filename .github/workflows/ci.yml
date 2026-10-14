@@ -1,11 +1,11 @@
 name: CI
 
-# A build check on every pull request. There is no test suite, so this installs
-# the backend's requirements, imports them and byte-compiles every module — enough
-# to catch a broken Dependabot bump or a syntax error before the merge deploys
-# prod. The `build` job name is the required status check in the `main` ruleset —
-# rename it there too if it changes. Runner pinned like deploy.yml; never
-# ubuntu-latest.
+# Checks on every pull request: `build` installs the backend's requirements,
+# imports them and byte-compiles every module (catches a broken Dependabot bump
+# or a syntax error before the merge deploys prod); `pytest` runs the backend
+# test suite (infra/functions/tests). The job names are the required status
+# checks in the `main` ruleset — rename them there too if they change. Runner
+# pinned like deploy.yml; never ubuntu-latest.
 
 on:
   pull_request:
@@ -36,3 +36,21 @@ jobs:
 
       - name: Byte-compile the backend
         run: python -m compileall -q infra/functions
+
+  pytest:
+    name: pytest
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Run backend tests
+        working-directory: infra/functions
+        run: |
+          pip install -r requirements-dev.txt
+          python -m pytest -q

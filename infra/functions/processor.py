@@ -370,7 +370,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
                         found = True
                         break
                 if not found:
-                    print(f"  Warning: Cover page not found for {slug} on {date_str}")
+                    print(f"  Warning: Cover page not found for a person on {date_str}")
 
             # 2. Add Segment Files
             for prefix, role in tasks:
@@ -503,7 +503,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
             output_filename = f"judgingpapers_{date_str}_{slug}.pdf"
             output_path = os.path.join(output_dir, output_filename)
             
-            print(f"  Creating {output_filename}...")
+            print(f"  Creating a personal packet for {date_str}...")
             total_pages += merge_pdfs(output_path, file_list) or 0
             count += 1
 
@@ -556,7 +556,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 try:
                     os.remove(filepath)
                 except OSError as e:
-                    print(f"  Error deleting {filepath}: {e}")
+                    print(f"  Error deleting an individual file: {e.strerror}")
 
     print(f"\nDone! Created judging paper files and daily summaries in '{output_dir}'.")
 

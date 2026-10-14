@@ -129,7 +129,8 @@ jobs:
 
           cd "$BUILD_DIR"
           rm -rf .venv __pycache__ .git .vscode *.pyc local.settings.json
-          rm -f test_*.py
+          rm -f test_*.py requirements-dev.txt
+          rm -rf tests .pytest_cache
 
           mkdir -p .python_packages/lib/site-packages
           pip install -r requirements.txt --only-binary=:all: --target .python_packages/lib/site-packages
