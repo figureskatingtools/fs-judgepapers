@@ -338,8 +338,8 @@ def test_combined_schedule_enabled(options, expected):
     ({"combinedScheduleCopies": 3}, 0),
     ({"globalCombinedSchedule": True}, 1),
     ({"globalCombinedSchedule": True, "combinedScheduleCopies": 3}, 3),
-    ({"globalCombinedSchedule": True, "combinedScheduleCopies": 5}, 5),
-    ({"globalCombinedSchedule": True, "combinedScheduleCopies": 9}, 5),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": 50}, 50),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": 99}, 50),
     ({"globalCombinedSchedule": True, "combinedScheduleCopies": 0}, 1),
     ({"globalCombinedSchedule": True, "combinedScheduleCopies": -2}, 1),
     ({"globalCombinedSchedule": True, "combinedScheduleCopies": "3"}, 1),
@@ -387,44 +387,49 @@ def packet_pages(out_dir, slug):
     return [page.extract_text() for page in PdfReader(path).pages]
 
 
-def test_packet_ends_with_the_combined_schedule(competition):
+def day_pages(out_dir):
+    return [page.extract_text() for page in PdfReader(str(out_dir / "judgingpapers_20260919.pdf")).pages]
+
+
+def test_day_document_ends_with_the_combined_schedule(competition):
     src, out = competition
 
     stats = processor.process_judging_papers(str(src), str(out), {"globalCombinedSchedule": True})
 
+    # The personal packet is unchanged: cover and the two segments' time schedules
     pages = packet_pages(out, "jon_judge")
-    # cover, the two segments' time schedules, then the combined schedule
-    assert len(pages) == 4
-    assert "Jon JUDGE" in pages[0]
-    assert "TIME SCHEDULE" in pages[1] and "TIME SCHEDULE" in pages[2]
-    assert "Time schedule and starting order | Saturday 19.09.2026" in pages[3]
-    assert "Fanni FORS" in pages[3] and "Pihla KUULA / Axel KANERVA" in pages[3]
+    assert len(pages) == 3
+    assert not any("Time schedule and starting order" in p for p in pages)
+    # The day's document: every packet of the day, then the schedule once
+    day = day_pages(out)
+    assert "Time schedule and starting order | Saturday 19.09.2026" in day[-1]
+    assert "Fanni FORS" in day[-1] and "Pihla KUULA / Axel KANERVA" in day[-1]
+    assert sum("Time schedule and starting order" in p for p in day) == 1
     assert stats["combined_schedule"] is True
     assert stats["combined_schedule_copies"] == 1
     assert (src / "combinedschedule_20260919.pdf").exists()
 
 
-def test_packet_ends_with_several_copies(competition):
+def test_day_document_ends_with_several_copies(competition):
     src, out = competition
 
     stats = processor.process_judging_papers(str(src), str(out), {"globalCombinedSchedule": True,
                                                                   "combinedScheduleCopies": 3})
 
-    pages = packet_pages(out, "jon_judge")
-    assert len(pages) == 6
-    assert not any("Time schedule and starting order" in p for p in pages[:3])
-    assert all("Time schedule and starting order" in p for p in pages[3:])
+    day = day_pages(out)
+    assert all("Time schedule and starting order" in p for p in day[-3:])
+    assert sum("Time schedule and starting order" in p for p in day) == 3
+    assert len(packet_pages(out, "jon_judge")) == 3
     assert stats["combined_schedule_copies"] == 3
 
 
-def test_packet_unchanged_without_the_option(competition):
+def test_documents_unchanged_without_the_option(competition):
     src, out = competition
 
     stats = processor.process_judging_papers(str(src), str(out), {})
 
-    pages = packet_pages(out, "jon_judge")
-    assert len(pages) == 3
-    assert not any("Time schedule and starting order" in p for p in pages)
+    assert len(packet_pages(out, "jon_judge")) == 3
+    assert not any("Time schedule and starting order" in p for p in day_pages(out))
     assert stats["combined_schedule"] is False
     assert stats["combined_schedule_copies"] == 0
     assert not (src / "combinedschedule_20260919.pdf").exists()
@@ -434,12 +439,14 @@ def test_combined_schedule_with_omitted_segment_pages(competition):
     src, out = competition
 
     processor.process_judging_papers(str(src), str(out), {"globalCombinedSchedule": True,
+                                                          "combinedScheduleCopies": 2,
                                                           "globalOmitSegmentCover": True})
 
     pages = packet_pages(out, "jon_judge")
-    assert len(pages) == 2
-    assert "Jon JUDGE" in pages[0]
-    assert "Time schedule and starting order" in pages[1]
+    assert len(pages) == 1 and "Jon JUDGE" in pages[0]
+    day = day_pages(out)
+    assert "Time schedule and starting order" not in day[-3]
+    assert all("Time schedule and starting order" in p for p in day[-2:])
 
 
 # --- review regressions ----------------------------------------------------

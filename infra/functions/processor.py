@@ -131,13 +131,14 @@ def segment_intro_page(options, prefix):
     return 'cover' if use_cover else 'schedule'
 
 
-COMBINED_SCHEDULE_MAX_COPIES = 5
+COMBINED_SCHEDULE_MAX_COPIES = 50
 
 
 def combined_schedule_enabled(options):
     """
-    Whether every packet ends with the day's combined time schedule
-    (globalCombinedSchedule; off by default). An add-on: the page before each
+    Whether the day's document (judgingpapers_{YYYYMMDD}.pdf, every packet of
+    the day) ends with the day's combined time schedule (globalCombinedSchedule;
+    off by default). The personal packets don't get it. An add-on: the page before each
     segment is chosen by segment_intro_page as before.
     """
     return options.get('globalCombinedSchedule') is True
@@ -145,8 +146,8 @@ def combined_schedule_enabled(options):
 
 def combined_schedule_copies(options):
     """
-    How many copies of the day's combined time schedule go at the end of each
-    packet (combinedScheduleCopies, 1 to COMBINED_SCHEDULE_MAX_COPIES; anything
+    How many copies of the day's combined time schedule go at the end of the
+    day's document (combinedScheduleCopies, 1 to COMBINED_SCHEDULE_MAX_COPIES; anything
     else, or a missing value, means 1). 0 when the schedule is off.
     """
     if not combined_schedule_enabled(options):
@@ -608,10 +609,6 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 elif role in ["data_operator", "replay_operator"]:
                     file_list.append(f"{base_path}_PlannedProgramContent.pdf")
             
-            # 2.5 The day's combined time schedule at the end, in as many copies as asked for
-            if date_str in combined_schedules:
-                file_list.extend([combined_schedules[date_str]] * schedule_copies)
-
             # 3. Merge and Save
             output_filename = f"judgingpapers_{date_str}_{slug}.pdf"
             output_path = os.path.join(output_dir, output_filename)
@@ -635,6 +632,11 @@ def process_judging_papers(source_dir, output_dir, options=None):
             if os.path.exists(filepath):
                 daily_files.append(filepath)
         
+        # The day's combined time schedule at the end of the whole document,
+        # in as many copies as asked for
+        if daily_files and date_str in combined_schedules:
+            daily_files.extend([combined_schedules[date_str]] * schedule_copies)
+
         if daily_files:
             daily_output_filename = f"judgingpapers_{date_str}.pdf"
             daily_output_path = os.path.join(output_dir, daily_output_filename)
