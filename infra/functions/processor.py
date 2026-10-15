@@ -104,6 +104,30 @@ def get_abbreviation_length(prefix, categories=None):
         return len(matched["abbreviation"])
     return None
 
+
+def segment_intro_page(options, prefix):
+    """
+    What goes in front of a segment's papers in a personal packet:
+    'cover' (generated segment cover page), 'schedule' (the StartListwithTimes
+    time schedule) or 'none'.
+
+    Options (per-prefix values override the global ones):
+      globalOmitSegmentCover / omitSegmentCovers {PREFIX: bool} -> 'none'
+      globalSegmentCover / segmentCovers {PREFIX: bool}         -> 'cover' vs 'schedule'
+    """
+    omit = options.get('globalOmitSegmentCover', False)
+    omit_per_segment = options.get('omitSegmentCovers')
+    if isinstance(omit_per_segment, dict) and prefix in omit_per_segment:
+        omit = omit_per_segment[prefix]
+    if omit is True:
+        return 'none'
+
+    use_cover = options.get('globalSegmentCover', False)
+    cover_per_segment = options.get('segmentCovers')
+    if isinstance(cover_per_segment, dict) and prefix in cover_per_segment:
+        use_cover = cover_per_segment[prefix]
+    return 'cover' if use_cover else 'schedule'
+
 def process_judging_papers(source_dir, output_dir, options=None):
     if options is None:
         options = {}
@@ -385,16 +409,9 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 start_list_path = f"{base_path}_StartListwithTimes.pdf"
                 judges_sheet_path = f"{base_path}_JudgesSheetAll.pdf"
 
-                # Check options for this segment
-                # If specific segment prefix is in options, use that.
-                # Else check global 'includeSegmentCover' (default false)
-                # Structure of options: { 'segmentCovers': { 'PREFIX': True/False }, 'globalSegmentCover': True/False }
-                
-                use_segment_cover = options.get('globalSegmentCover', False)
-                if 'segmentCovers' in options and prefix in options['segmentCovers']:
-                    use_segment_cover = options['segmentCovers'][prefix]
-                
-                if use_segment_cover:
+                intro_page = segment_intro_page(options, prefix)
+
+                if intro_page == 'cover':
                     # Generate Segment Cover Page
                     segment_cover_filename = f"segmentcover_{prefix}.pdf"
                     segment_cover_path = os.path.join(segment_dir, segment_cover_filename)
@@ -436,7 +453,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
                          file_list.append(segment_cover_path)
                     else:
                          print(f"  Warning: Could not create segment cover for {prefix}")
-                else:
+                elif intro_page == 'schedule':
                     # Use Start List — apply strikethrough if there are withdrawn competitors
                     withdrawn_for_segment = prefix_withdrawn.get(prefix, [])
                     if withdrawn_for_segment:
