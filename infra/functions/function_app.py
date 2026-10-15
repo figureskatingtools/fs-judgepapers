@@ -178,6 +178,13 @@ def get_user_email_from_header(req: func.HttpRequest) -> str | None:
     logging.warning(f"No identity found. Header names: {sorted(k.lower() for k in req.headers.keys())}")
     return None
 
+# Liveness for the site's admin diagnostics: no sign-in, no secret, no storage
+# (the same shape as the platform API's /api/health).
+@app.route(route="health", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
+def health(req: func.HttpRequest) -> func.HttpResponse:
+    return func.HttpResponse(json.dumps({"status": "ok", "service": "fs-judgepapers"}), mimetype="application/json")
+
+
 @app.route(route="check_user_permission", auth_level=func.AuthLevel.ANONYMOUS)
 def check_user_permission(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Checking user permission...')
