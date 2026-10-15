@@ -56,10 +56,22 @@ FS_ROWS = [
 ]
 
 
+def draw_words(c, x, y, text):
+    """Draw text one word per text run, a space's width apart, with no space characters."""
+    space = c.stringWidth(" ", c._fontname, c._fontsize)
+    for word in text.split(" "):
+        if word:
+            c.drawString(x, y, word)
+        x += c.stringWidth(word, c._fontname, c._fontsize) + space
+
+
 def make_start_list(path, title, rows_per_page, params, printed="18.09.2026 13.10",
-                    date_line="SATURDAY, 19 SEPTEMBER 2026", banner=True, free_skating=False):
-    """Draw an FSM-like StartListwithTimes; rows_per_page is a list of row lists."""
+                    date_line="SATURDAY, 19 SEPTEMBER 2026", banner=True, free_skating=False,
+                    word_runs=False):
+    """Draw an FSM-like StartListwithTimes; rows_per_page is a list of row lists.
+    word_runs draws the title, date and names one word per text run."""
     nation_x = 435 if free_skating else 527
+    text = draw_words if word_runs else (lambda c, x, y, t: c.drawString(x, y, t))
     c = canvas.Canvas(str(path), pagesize=A4)
     pages = len(rows_per_page)
     for page_no, rows in enumerate(rows_per_page, start=1):
@@ -70,8 +82,8 @@ def make_start_list(path, title, rows_per_page, params, printed="18.09.2026 13.1
             c.restoreState()
         c.setFont("Helvetica-Bold", 11.8)
         c.drawString(23, 760.5, "TIME SCHEDULE")
-        c.drawString(23, 742.6, title)
-        c.drawString(26, 716.1, date_line)
+        text(c, 23, 742.6, title)
+        text(c, 26, 716.1, date_line)
         c.setFont("Helvetica-Bold", 9.8)
         c.drawString(nation_x, 716.6, "Nation")
         if free_skating:
@@ -89,7 +101,7 @@ def make_start_list(path, title, rows_per_page, params, printed="18.09.2026 13.1
             if number:
                 c.drawRightString(146, y, number)
             c.setFont("Helvetica-Bold" if kind == "label" else "Helvetica", 9.8)
-            c.drawString(167, y, name)
+            text(c, 167, y, name)
             c.setFont("Helvetica", 9.8)
             if club:
                 c.drawString(nation_x, y, club)
@@ -295,6 +307,46 @@ def test_long_segment_continues_on_the_next_page(tmp_path):
     assert "CAT A | FREE SKATING (cont.)" in text
     assert "1 / 2" in text and "2 / 2" in text
     assert "Sunday 20.09.2026" in text
+
+
+def test_layout_refuses_a_page_too_short_for_any_block():
+    # Used to append empty continuation pages forever.
+    with pytest.raises(ValueError):
+        cs._layout([_fake_segment("A", 5)], content_top=cs.CONTENT_BOTTOM + 60)
+
+
+def test_last_piece_keeps_a_row_with_the_parameters():
+    for n in range(40, 80):
+        pages = cs._layout([_fake_segment("A", n)], content_top=740)
+        assert all(piece["rows"] for page in pages for piece in page)
+        assert pages[-1][-1]["params"] is True
+        assert sum(len(piece["rows"]) for page in pages for piece in page) == n
+
+
+def test_a_very_tall_banner_is_left_out(tmp_path, sp_list):
+    banner = cs.find_banner(sp_list)
+    banner["bottom"] = 300  # would leave under 300 pt for the table
+    out = str(tmp_path / "combined.pdf")
+
+    assert cs.create_combined_schedule_pdf(out, datetime(2026, 9, 19), [segment(sp_list, "SP")], banner) == 1
+
+    assert "/XObject" not in PdfReader(out).pages[0]["/Resources"]
+    assert "Aino ÄÄRELÄ" in extract_text(out)
+
+
+def test_words_drawn_as_separate_runs_keep_their_spaces(tmp_path):
+    path = make_start_list(tmp_path / "W_StartListwithTimes.pdf", "JUNIORI NAISET  SHORT PROGRAM",
+                           [SP_ROWS], PARAMS_SP, word_runs=True)
+
+    parsed = cs.parse_start_list(path)
+
+    assert parsed["title_line"] == "JUNIORI NAISET  SHORT PROGRAM"
+    assert parsed["date"] == datetime(2026, 9, 19)
+    assert [r["name"] for r in parsed["rows"]] == [
+        "Warm-Up Group 1", "Aino ÄÄRELÄ", "Bea BÖRJESSON", "Ice Resurfacing",
+        "Cilla CÉDERLÖF", "Pihla KUULA / Axel KANERVA"]
+    assert parsed["rows"][4]["kind"] == "withdrawn"
+    assert cs.is_struck(parsed["rows"][1], {"aino äärelä"})
 
 
 def test_struck_rows():

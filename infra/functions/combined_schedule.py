@@ -68,6 +68,7 @@ _RANK_HEADERS = {"current", "rank", "points", "currentrank", "current rank"}
 ROW_Y_TOLERANCE = 3    # pt; chars of one table row sit within this of each other
 CELL_GAP = 4           # pt; a wider horizontal gap starts a new cell
 CLUB_SLACK = 15        # pt; club cells may start a little left of the 'Nation' header
+WORD_GAP = 0.15        # em; a narrower gap than CELL_GAP but wider than this is a word space
 
 
 def _chars(obj):
@@ -81,7 +82,9 @@ def _chars(obj):
 def _page_rows(layout_page):
     """
     Rows of cells on a page, top to bottom: [(y, [(x0, text, bold), ...]), ...].
-    Characters are clustered into rows by y and into cells by horizontal gaps.
+    Characters are clustered into rows by y and into cells by horizontal gaps;
+    inside a cell a gap of more than WORD_GAP em is a word space (words drawn
+    as separate text runs have no space character between them).
     """
     chars = sorted(_chars(layout_page), key=lambda c: (-c.y0, c.x0))
     clusters = []
@@ -95,7 +98,10 @@ def _page_rows(layout_page):
     for y, row_chars in clusters:
         cells = []
         for ch in sorted(row_chars, key=lambda c: c.x0):
-            if cells and ch.x0 - cells[-1]["x1"] <= CELL_GAP:
+            gap = ch.x0 - cells[-1]["x1"] if cells else None
+            if cells and gap <= CELL_GAP:
+                if gap > WORD_GAP * ch.size and not cells[-1]["text"].endswith(" "):
+                    cells[-1]["text"] += " "
                 cells[-1]["text"] += ch.get_text()
                 cells[-1]["x1"] = ch.x1
             else:
@@ -187,7 +193,8 @@ def parse_start_list(pdf_path):
         for i, (y, cells) in enumerate(rows):
             text = _row_text(cells)
             if result["title_line"] is None and i > 0 and _row_text(rows[i - 1][1]).upper() == "TIME SCHEDULE":
-                result["title_line"] = text
+                # Cells kept two spaces apart: split_title splits category and segment there
+                result["title_line"] = "  ".join(t for _, t, _ in cells)
             for x0, cell, _ in cells:
                 if cell.lower() == "nation":
                     nation_x = x0
@@ -391,6 +398,8 @@ ROW_H = 13.5
 PARAM_GAP = 5
 PARAM_LEAD = 10
 BLOCK_GAP = 14
+HEADER_H = 42          # heading + column titles, from just under the banner to the first block
+MIN_CONTENT_H = 300    # pt of table space a banner must leave, or it is left out
 
 BAR_FILL = (0.894, 0.918, 0.945)
 RULE = (0.835, 0.851, 0.871)
@@ -460,6 +469,11 @@ def _layout(segments, content_top):
         return BAR_H + BAR_GAP + max(n_rows, 1) * ROW_H + (
             PARAM_GAP + n_params * PARAM_LEAD if n_params else 0) + BLOCK_GAP
 
+    # Every block's last piece (one row plus its parameters) must fit on a page,
+    # or the continuation below would never end.
+    if any(height(1, len(_param_lines(seg["params"]))) > full for seg in segments):
+        raise ValueError("no room on the page for a segment block")
+
     for seg in segments:
         rows = list(seg["rows"])
         n_params = len(_param_lines(seg["params"]))
@@ -480,7 +494,8 @@ def _layout(segments, content_top):
                 pages.append(current)
                 current, used = [], 0
                 continue
-            room = max(room, 1)
+            # Leave at least one row to carry the parameters on the next page.
+            room = max(min(room, len(rows) - 1), 1)
             current.append({"segment": seg, "rows": rows[:room], "cont": cont, "params": False})
             pages.append(current)
             current, used = [], 0
@@ -572,11 +587,13 @@ def create_combined_schedule_pdf(output_path, date_obj, segments, banner=None, w
     withdrawn_by_prefix = withdrawn_by_prefix or {}
     if banner and not (abs(banner["size"][0] - PAGE_W) < 2 and abs(banner["size"][1] - PAGE_H) < 2):
         banner = None  # not an A4 portrait source; positions wouldn't carry over
+    if banner and banner["bottom"] - 8 - HEADER_H - CONTENT_BOTTOM < MIN_CONTENT_H:
+        banner = None  # a banner this tall would leave too little room for the table
 
     top = (banner["bottom"] - 8) if banner else TOP_NO_BANNER
+    content_top = top - HEADER_H
     heading_y = top - 14
     columns_y = heading_y - 20
-    content_top = columns_y - 8
 
     pages = _layout(segments, content_top)
     weekday = WEEKDAYS[date_obj.weekday()]
