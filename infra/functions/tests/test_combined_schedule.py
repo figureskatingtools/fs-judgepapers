@@ -19,7 +19,7 @@ from reportlab.pdfgen import canvas
 
 import combined_schedule as cs
 import processor
-from processor import combined_schedule_enabled
+from processor import combined_schedule_enabled, combined_schedule_copies
 
 LOGO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "logo.png")
 FSM_SCALE = 0.2834646
@@ -333,6 +333,24 @@ def test_combined_schedule_enabled(options, expected):
     assert combined_schedule_enabled(options) is expected
 
 
+@pytest.mark.parametrize("options, expected", [
+    ({}, 0),
+    ({"combinedScheduleCopies": 3}, 0),
+    ({"globalCombinedSchedule": True}, 1),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": 3}, 3),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": 5}, 5),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": 9}, 5),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": 0}, 1),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": -2}, 1),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": "3"}, 1),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": 2.0}, 1),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": True}, 1),
+    ({"globalCombinedSchedule": True, "combinedScheduleCopies": None}, 1),
+])
+def test_combined_schedule_copies(options, expected):
+    assert combined_schedule_copies(options) == expected
+
+
 def make_panel(path, people):
     c = canvas.Canvas(str(path), pagesize=A4)
     c.setFont("Helvetica", 10)
@@ -369,20 +387,34 @@ def packet_pages(out_dir, slug):
     return [page.extract_text() for page in PdfReader(path).pages]
 
 
-def test_packet_gets_the_combined_schedule_after_the_cover(competition):
+def test_packet_ends_with_the_combined_schedule(competition):
     src, out = competition
 
     stats = processor.process_judging_papers(str(src), str(out), {"globalCombinedSchedule": True})
 
     pages = packet_pages(out, "jon_judge")
-    # cover, combined schedule, then the two segments' time schedules
+    # cover, the two segments' time schedules, then the combined schedule
     assert len(pages) == 4
     assert "Jon JUDGE" in pages[0]
-    assert "Time schedule and starting order | Saturday 19.09.2026" in pages[1]
-    assert "Fanni FORS" in pages[1] and "Pihla KUULA / Axel KANERVA" in pages[1]
-    assert "TIME SCHEDULE" in pages[2]
+    assert "TIME SCHEDULE" in pages[1] and "TIME SCHEDULE" in pages[2]
+    assert "Time schedule and starting order | Saturday 19.09.2026" in pages[3]
+    assert "Fanni FORS" in pages[3] and "Pihla KUULA / Axel KANERVA" in pages[3]
     assert stats["combined_schedule"] is True
+    assert stats["combined_schedule_copies"] == 1
     assert (src / "combinedschedule_20260919.pdf").exists()
+
+
+def test_packet_ends_with_several_copies(competition):
+    src, out = competition
+
+    stats = processor.process_judging_papers(str(src), str(out), {"globalCombinedSchedule": True,
+                                                                  "combinedScheduleCopies": 3})
+
+    pages = packet_pages(out, "jon_judge")
+    assert len(pages) == 6
+    assert not any("Time schedule and starting order" in p for p in pages[:3])
+    assert all("Time schedule and starting order" in p for p in pages[3:])
+    assert stats["combined_schedule_copies"] == 3
 
 
 def test_packet_unchanged_without_the_option(competition):
@@ -394,6 +426,7 @@ def test_packet_unchanged_without_the_option(competition):
     assert len(pages) == 3
     assert not any("Time schedule and starting order" in p for p in pages)
     assert stats["combined_schedule"] is False
+    assert stats["combined_schedule_copies"] == 0
     assert not (src / "combinedschedule_20260919.pdf").exists()
 
 
@@ -405,6 +438,7 @@ def test_combined_schedule_with_omitted_segment_pages(competition):
 
     pages = packet_pages(out, "jon_judge")
     assert len(pages) == 2
+    assert "Jon JUDGE" in pages[0]
     assert "Time schedule and starting order" in pages[1]
 
 
@@ -448,8 +482,10 @@ def test_combined_schedule_flag_is_stored(tables):
     import function_app as fa
     tables["competitions"].put(PartitionKey="GLOBAL", RowKey="abcd1234", Name="X")
 
-    fa._store_competition_statistics("abcd1234", {"pages_generated": 3, "combined_schedule": True})
-    assert tables["competitions"].row("GLOBAL", "abcd1234")["CombinedSchedule"] is True
+    fa._store_competition_statistics("abcd1234", {"pages_generated": 3, "combined_schedule": True,
+                                                  "combined_schedule_copies": 2})
+    row = tables["competitions"].row("GLOBAL", "abcd1234")
+    assert row["CombinedSchedule"] is True and row["CombinedScheduleCopies"] == 2
 
     fa._store_competition_statistics("abcd1234", {"pages_generated": 3, "combined_schedule": False})
     assert tables["competitions"].row("GLOBAL", "abcd1234")["CombinedSchedule"] is False

@@ -653,6 +653,7 @@ def _store_competition_statistics(comp_id, stats):
             "judging_method": ("JudgingMethod", False),
             "language": ("PacketLanguage", False),
             "combined_schedule": ("CombinedSchedule", False),
+            "combined_schedule_copies": ("CombinedScheduleCopies", False),
         }
         for key, (column, as_json) in column_map.items():
             value = stats.get(key)

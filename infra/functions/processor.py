@@ -131,13 +131,30 @@ def segment_intro_page(options, prefix):
     return 'cover' if use_cover else 'schedule'
 
 
+COMBINED_SCHEDULE_MAX_COPIES = 5
+
+
 def combined_schedule_enabled(options):
     """
-    Whether every packet gets the day's combined time schedule right after the
-    personal cover page (globalCombinedSchedule; off by default). An add-on:
-    the page before each segment is chosen by segment_intro_page as before.
+    Whether every packet ends with the day's combined time schedule
+    (globalCombinedSchedule; off by default). An add-on: the page before each
+    segment is chosen by segment_intro_page as before.
     """
     return options.get('globalCombinedSchedule') is True
+
+
+def combined_schedule_copies(options):
+    """
+    How many copies of the day's combined time schedule go at the end of each
+    packet (combinedScheduleCopies, 1 to COMBINED_SCHEDULE_MAX_COPIES; anything
+    else, or a missing value, means 1). 0 when the schedule is off.
+    """
+    if not combined_schedule_enabled(options):
+        return 0
+    copies = options.get('combinedScheduleCopies')
+    if isinstance(copies, bool) or not isinstance(copies, int):
+        return 1
+    return min(max(copies, 1), COMBINED_SCHEDULE_MAX_COPIES)
 
 
 def build_combined_schedules(source_dir, dates, prefix_start_times, prefix_segment_names, prefix_withdrawn):
@@ -408,7 +425,8 @@ def process_judging_papers(source_dir, output_dir, options=None):
     # 2.6 Combined time schedule per day (optional add-on page)
     # ---------------------------------------------------------
     combined_schedules = {}
-    if combined_schedule_enabled(options):
+    schedule_copies = combined_schedule_copies(options)
+    if schedule_copies:
         print("\n[2.6] Creating combined time schedules...")
         combined_schedules = build_combined_schedules(
             source_dir, set(person_tasks.keys()), prefix_start_times,
@@ -469,10 +487,6 @@ def process_judging_papers(source_dir, output_dir, options=None):
                         break
                 if not found:
                     print(f"  Warning: Cover page not found for a person on {date_str}")
-
-            # 1.5 The day's combined time schedule, when asked for
-            if date_str in combined_schedules:
-                file_list.append(combined_schedules[date_str])
 
             # 2. Add Segment Files
             for prefix, role in tasks:
@@ -594,6 +608,10 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 elif role in ["data_operator", "replay_operator"]:
                     file_list.append(f"{base_path}_PlannedProgramContent.pdf")
             
+            # 2.5 The day's combined time schedule at the end, in as many copies as asked for
+            if date_str in combined_schedules:
+                file_list.extend([combined_schedules[date_str]] * schedule_copies)
+
             # 3. Merge and Save
             output_filename = f"judgingpapers_{date_str}_{slug}.pdf"
             output_path = os.path.join(output_dir, output_filename)
@@ -663,7 +681,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
             categories, schedule_entries, person_tasks, prefix_withdrawn,
             language, total_pages, withdrawn_pages_removed,
             judging_method_overrides=judging_overrides,
-            combined_schedule=bool(combined_schedules)
+            combined_schedule_copies=schedule_copies if combined_schedules else 0
         )
     except Exception as e:
         print(f"  Warning: Failed to compute statistics: {e}")
@@ -674,7 +692,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
 
 def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withdrawn,
                         language, total_pages, withdrawn_pages_removed=0,
-                        judging_method_overrides=None, combined_schedule=False):
+                        judging_method_overrides=None, combined_schedule_copies=0):
     """
     Build a usage-statistics dict from the structures accumulated during
     process_judging_papers. Stored on the competitions table row (which
@@ -775,5 +793,6 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
         "judging_method": _single_or_mixed(judging_methods),
         "language": language,
         "pages_generated": total_pages,
-        "combined_schedule": combined_schedule,
+        "combined_schedule": combined_schedule_copies > 0,
+        "combined_schedule_copies": combined_schedule_copies,
     }
