@@ -236,6 +236,7 @@ def test_page_text_banner_and_footer(tmp_path, sp_list, fs_list):
     assert "Introduction: 0:30   Judging First: 2:45   Judging Last: 2:45" in text
     assert "Sources printed 18.09.2026 13.06–13.10." in text
     assert "1 / 1" in text
+    assert "Created with Figureskatingtools.com - Supporting the Figure Skating Community" in text
     # Rank/points never reach the page.
     assert "18.05" not in text
 

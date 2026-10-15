@@ -25,6 +25,11 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
+try:
+    from .create_cover_pages import FOOTER_TEXT
+except ImportError:
+    from create_cover_pages import FOOTER_TEXT
+
 FONTS_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
 
 
@@ -370,8 +375,10 @@ def _add_banner(writer, page, banner_xobjects, draws):
 PAGE_W, PAGE_H = A4
 LEFT, RIGHT = 34, PAGE_W - 34
 TOP_NO_BANNER = PAGE_H - 34
-FOOTER_Y = 28
-CONTENT_BOTTOM = 48
+FOOTER_RULE_Y = 44
+FOOTER_Y = 34        # sources note (left) and page number (right)
+FOOTER_BRAND_Y = 24  # FOOTER_TEXT, right-aligned like on the cover pages
+CONTENT_BOTTOM = 54
 
 COL_TIME = LEFT + 6
 COL_NO_RIGHT = LEFT + 150
@@ -596,8 +603,13 @@ def create_combined_schedule_pdf(output_path, date_obj, segments, banner=None, w
 
         c.setFillColorRGB(*MUTED)
         c.setFont(FONT_REGULAR, 7)
+        c.setStrokeColorRGB(*RULE)
+        c.setLineWidth(0.5)
+        c.line(LEFT, FOOTER_RULE_Y, RIGHT, FOOTER_RULE_Y)
         c.drawString(LEFT, FOOTER_Y, note)
         c.drawRightString(RIGHT, FOOTER_Y, f"{page_no} / {len(pages)}")
+        c.setFont(FONT_REGULAR, 6.5)
+        c.drawRightString(RIGHT, FOOTER_BRAND_Y, FOOTER_TEXT)
         c.showPage()
     c.save()
     buf.seek(0)
