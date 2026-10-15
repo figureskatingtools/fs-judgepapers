@@ -50,7 +50,8 @@ Both header names are matched case-insensitively (each is looked up in both
 - `_proxy_secret_ok()` **fails open when the app setting is empty** — local dev
   and brief pre-rollout windows work without it. When it is set, a missing or
   mismatched `x-proxy-secret` makes `get_user_email_from_header()` return `None`,
-  and every endpoint turns that into **401**.
+  and every endpoint turns that into **401** — except `GET health` (see below),
+  which checks no secret.
 - Rotate by updating both sides (this repo's env secret + the site repo's
   `PROXY_SHARED_SECRET_JUDGEPAPERS`) and redeploying; old and new hosts can run
   in parallel during a migration only while they share the same value.
@@ -75,11 +76,15 @@ Steps 1, 3 and 4 are legacy/compatibility paths kept for direct-call debugging.
 They are only reachable **after** the shared-secret gate, so they cannot be used
 to spoof an identity from the public internet.
 
-Every endpoint must call `get_user_email_from_header(req)` and return **401**
-when it returns `None`. `is_user_allowed(email)` is the (currently
+Every endpoint except the two below must call `get_user_email_from_header(req)`
+and return **401** when it returns `None`. `is_user_allowed(email)` is the (currently
 allow-everyone) authorization hook layered on top.
 
-**One exception: `GET download_judge_papers`.** It serves the link e-mailed by
+**`GET health`** needs neither identity nor the shared secret: it answers
+`{"status": "ok", "service": "fs-judgepapers"}` without touching storage, for
+the site's admin diagnostics (the router pings it with the secret anyway).
+
+**`GET download_judge_papers`** needs no identity. It serves the link e-mailed by
 `send_judge_papers` (`https://figureskatingtools.com/judgepapers/download?t=<token>`),
 and the recipient isn't signed in. The router proxies that exact public path
 (excluded from Easy Auth) to `/api/download_judge_papers?t=<token>` without a
