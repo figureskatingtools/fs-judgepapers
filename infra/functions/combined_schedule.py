@@ -50,7 +50,10 @@ PARAM_KEYS = ("Resurfacing", "Warm-Up", "Duration of Skating",
 _PARAM_RE = re.compile(
     r"(" + "|".join(re.escape(k) for k in PARAM_KEYS) + r"):\s*(.*?)"
     r"(?=\s+(?:" + "|".join(re.escape(k) for k in PARAM_KEYS) + r"):|$)")
-_TIME_RE = re.compile(r"^\d{1,2}[.:]\d{2}[.:]\d{2}$")
+_TIME = r"\d{1,2}[.:]\d{2}[.:]\d{2}"
+# A time cell: one time, a lone dash, or a pair in one cell, separated by a
+# dash ('9.30.00 - 9.35.00') or only by spaces ('11:10:00  11:15:00').
+_TIME_CELL_RE = re.compile(rf"^(?:{_TIME}(?:\s*[-–]\s*|\s+){_TIME}|{_TIME}|[-–])$")
 _DATE_RE = re.compile(
     r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
     re.IGNORECASE)
@@ -117,9 +120,8 @@ def _parse_table_row(cells, nation_x, rank_x):
     """One table row -> {kind, time, number, name, club, bold}."""
     cells = list(cells)
     times = []
-    while cells and (_TIME_RE.match(cells[0][1]) or cells[0][1] in ("-", "–")
-                     or re.fullmatch(r"\d{1,2}[.:]\d{2}[.:]\d{2}\s*[-–]\s*\d{1,2}[.:]\d{2}[.:]\d{2}", cells[0][1])):
-        times.extend(t for t in re.split(r"\s*[-–]\s*", cells.pop(0)[1]) if t)
+    while cells and _TIME_CELL_RE.match(cells[0][1]):
+        times.extend(re.findall(_TIME, cells.pop(0)[1]))
     time = " - ".join(times)
 
     number = ""
@@ -298,8 +300,9 @@ def find_banner(pdf_path):
 
         reader = PdfReader(pdf_path)
         page = reader.pages[0]
-        xobjects = page.get("/Resources", {}).get("/XObject", {})
-        xobjects = xobjects.get_object() if xobjects else {}
+        # Subscripting resolves indirect references; dict.get() would not.
+        resources = page["/Resources"].get_object() if "/Resources" in page else {}
+        xobjects = resources["/XObject"].get_object() if "/XObject" in resources else {}
         ops = ContentStream(page.get_contents(), reader).operations
 
         ctm, stack, draws = [1, 0, 0, 1, 0, 0], [], []
@@ -312,10 +315,9 @@ def find_banner(pdf_path):
                 ctm = _mul([float(v) for v in operands], ctm)
             elif op == b"Do":
                 name = operands[0]
-                xobj = xobjects.get(name)
-                if xobj is None:
+                if name not in xobjects:
                     continue
-                xobj = xobj.get_object()
+                xobj = xobjects[name].get_object()
                 subtype = xobj.get("/Subtype")
                 if subtype == "/Image":
                     box = _bbox(ctm)

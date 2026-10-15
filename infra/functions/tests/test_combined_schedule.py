@@ -13,6 +13,7 @@ from datetime import datetime
 import pytest
 from pdfminer.high_level import extract_text
 from pypdf import PdfReader
+from pypdf.generic import DictionaryObject, IndirectObject, NameObject
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
@@ -404,3 +405,50 @@ def test_combined_schedule_with_omitted_segment_pages(competition):
     pages = packet_pages(out, "jon_judge")
     assert len(pages) == 2
     assert "Time schedule and starting order" in pages[1]
+
+
+# --- review regressions ----------------------------------------------------
+
+def test_time_pair_in_one_cell_separated_by_spaces():
+    # Some StartLists print '11:10:00  11:15:00' as a single text run.
+    cells = [(26, "11:10:00  11:15:00", False), (138, "3", False),
+             (167, "Aino ÄÄRELÄ", False), (527, "TL", False)]
+
+    row = cs._parse_table_row(cells, nation_x=527, rank_x=None)
+
+    assert (row["kind"], row["time"], row["number"], row["name"], row["club"]) == (
+        "skater", "11:10:00 - 11:15:00", "3", "Aino ÄÄRELÄ", "TL")
+
+
+def test_time_pair_in_one_cell_with_a_dash():
+    row = cs._parse_table_row([(26, "9.30.00 - 9.35.00", False), (167, "Warm-Up Group 1", True)],
+                              nation_x=527, rank_x=None)
+    assert (row["kind"], row["time"], row["name"]) == ("warmup", "9.30.00 - 9.35.00", "Warm-Up Group 1")
+
+
+def test_banner_found_with_indirect_resources(tmp_path, sp_list):
+    from pypdf import PdfWriter
+    writer = PdfWriter(clone_from=sp_list)
+    page = writer.pages[0]
+    resources = page["/Resources"].get_object()
+    xobjects = resources["/XObject"].get_object()
+    resources[NameObject("/XObject")] = writer._add_object(DictionaryObject(xobjects))
+    page[NameObject("/Resources")] = writer._add_object(DictionaryObject(resources))
+    path = str(tmp_path / "indirect.pdf")
+    writer.write(path)
+    assert isinstance(PdfReader(path).pages[0].raw_get("/Resources"), IndirectObject)
+
+    banner = cs.find_banner(path)
+
+    assert banner is not None and len(banner["draws"]) == 1
+
+
+def test_combined_schedule_flag_is_stored(tables):
+    import function_app as fa
+    tables["competitions"].put(PartitionKey="GLOBAL", RowKey="abcd1234", Name="X")
+
+    fa._store_competition_statistics("abcd1234", {"pages_generated": 3, "combined_schedule": True})
+    assert tables["competitions"].row("GLOBAL", "abcd1234")["CombinedSchedule"] is True
+
+    fa._store_competition_statistics("abcd1234", {"pages_generated": 3, "combined_schedule": False})
+    assert tables["competitions"].row("GLOBAL", "abcd1234")["CombinedSchedule"] is False
