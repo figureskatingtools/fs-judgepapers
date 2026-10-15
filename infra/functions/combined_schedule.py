@@ -386,6 +386,11 @@ BLOCK_GAP = 14
 BAR_FILL = (0.894, 0.918, 0.945)
 RULE = (0.835, 0.851, 0.871)
 MUTED = (0.42, 0.42, 0.42)
+# Row bands that divide a segment into its warm-up groups.
+ROW_FILLS = {
+    "warmup": (0.867, 0.937, 0.894),       # pale green
+    "resurfacing": (0.992, 0.925, 0.796),  # pale amber
+}
 
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
@@ -498,9 +503,14 @@ def _draw_block(c, y, piece, withdrawn):
 
     for row in piece["rows"]:
         base = y - ROW_H + 4
+        fill = ROW_FILLS.get(row["kind"])
+        if fill:
+            c.setFillColorRGB(*fill)
+            c.rect(LEFT, y - ROW_H, RIGHT - LEFT, ROW_H, stroke=0, fill=1)
+        font = FONT_BOLD if fill else FONT_REGULAR
         struck = is_struck(row, withdrawn)
         c.setFillColorRGB(*(MUTED if struck else (0, 0, 0)))
-        c.setFont(FONT_REGULAR, 8.5)
+        c.setFont(font, 8.5)
         if row["time"]:
             c.drawString(COL_TIME, base, row["time"])
         if row["number"]:
@@ -512,8 +522,8 @@ def _draw_block(c, y, piece, withdrawn):
             c.drawRightString(COL_CLUB_RIGHT, base, club)
             club_w = c.stringWidth(club, FONT_REGULAR, club_size)
         if row["name"]:
-            name, size = _fit(c, row["name"], FONT_REGULAR, 8.5, COL_CLUB_RIGHT - club_w - 10 - COL_NAME)
-            c.setFont(FONT_REGULAR, size)
+            name, size = _fit(c, row["name"], font, 8.5, COL_CLUB_RIGHT - club_w - 10 - COL_NAME)
+            c.setFont(font, size)
             c.drawString(COL_NAME, base, name)
         if struck:
             c.setStrokeColorRGB(*MUTED)
@@ -574,7 +584,7 @@ def create_combined_schedule_pdf(output_path, date_obj, segments, banner=None, w
         c.setFont(FONT_BOLD, 7.5)
         c.drawString(COL_TIME, columns_y, "TIME")
         c.drawRightString(COL_NO_RIGHT, columns_y, "NO.")
-        c.drawString(COL_NAME, columns_y, "SKATER / COUPLE")
+        c.drawString(COL_NAME, columns_y, "SKATER / COUPLE / TEAM")
         c.drawRightString(COL_CLUB_RIGHT, columns_y, "CLUB")
 
         y = content_top

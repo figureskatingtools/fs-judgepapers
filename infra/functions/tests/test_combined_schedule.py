@@ -238,7 +238,13 @@ def test_page_text_banner_and_footer(tmp_path, sp_list, fs_list):
     # Rank/points never reach the page.
     assert "18.05" not in text
 
+    assert "SKATER / COUPLE / TEAM" in text
+
     page = PdfReader(out).pages[0]
+    # Warm-up and resurfacing rows sit on their own coloured bands.
+    content = page.get_contents().get_data()
+    assert b".867 .937 .894 rg" in content  # warm-up
+    assert b".992 .925 .796 rg" in content  # resurfacing
     xobjects = page["/Resources"]["/XObject"]
     assert "/FstBanner0" in xobjects
     assert xobjects["/FstBanner0"]["/Subtype"] == "/Image"
