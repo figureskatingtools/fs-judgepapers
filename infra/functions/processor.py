@@ -11,6 +11,7 @@ try:
     from .combine_judging_papers import get_date_from_start_list, get_first_start_time_from_start_list, get_panel_info, merge_pdfs, slugify
     from .categories import load_categories, match_category, parse_filename_generic, effective_judging_method
     from .competition_schedule import parse_competition_schedule, get_schedule_start_time
+    from .combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
 except ImportError:
     # Fallback for local testing if not running as package
     from split_judges_sheets import split_pdf, filter_withdrawn_pages
@@ -18,6 +19,7 @@ except ImportError:
     from combine_judging_papers import get_date_from_start_list, get_first_start_time_from_start_list, get_panel_info, merge_pdfs, slugify
     from categories import load_categories, match_category, parse_filename_generic, effective_judging_method
     from competition_schedule import parse_competition_schedule, get_schedule_start_time
+    from combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
 
 
 def _get_categories_for_processor():
@@ -127,6 +129,86 @@ def segment_intro_page(options, prefix):
     if isinstance(cover_per_segment, dict) and prefix in cover_per_segment:
         use_cover = cover_per_segment[prefix]
     return 'cover' if use_cover else 'schedule'
+
+
+COMBINED_SCHEDULE_MAX_COPIES = 50
+
+
+def combined_schedule_enabled(options):
+    """
+    Whether the day's document (judgingpapers_{YYYYMMDD}.pdf, every packet of
+    the day) ends with the day's combined time schedule (globalCombinedSchedule;
+    off by default). The personal packets don't get it. An add-on: the page before each
+    segment is chosen by segment_intro_page as before.
+    """
+    return options.get('globalCombinedSchedule') is True
+
+
+def combined_schedule_copies(options):
+    """
+    How many copies of the day's combined time schedule go at the end of the
+    day's document (combinedScheduleCopies, 1 to COMBINED_SCHEDULE_MAX_COPIES; anything
+    else, or a missing value, means 1). 0 when the schedule is off.
+    """
+    if not combined_schedule_enabled(options):
+        return 0
+    copies = options.get('combinedScheduleCopies')
+    if isinstance(copies, bool) or not isinstance(copies, int):
+        return 1
+    return min(max(copies, 1), COMBINED_SCHEDULE_MAX_COPIES)
+
+
+def build_combined_schedules(source_dir, dates, prefix_start_times, prefix_segment_names, prefix_withdrawn):
+    """
+    Write combinedschedule_{YYYYMMDD}.pdf into source_dir for each date in
+    `dates`: every segment whose StartListwithTimes is on that day, in running
+    order. Best-effort: a day whose lists can't be read gets no page.
+    Returns {date_str: path} of the pages written.
+    """
+    by_date = {}
+    for root, dirs, files in os.walk(source_dir):
+        for file in files:
+            # The *_StartListwithTimes_strikethrough.pdf copies don't match.
+            if not file.endswith("_StartListwithTimes.pdf"):
+                continue
+            path = os.path.join(root, file)
+            date_str = get_date_from_start_list(path)
+            if date_str not in dates:
+                continue
+            parsed = parse_start_list(path)
+            if not parsed:
+                continue
+            prefix = file.replace("_StartListwithTimes.pdf", "")
+            parsed.update({
+                'prefix': prefix,
+                'path': path,
+                'segment_hint': prefix_segment_names.get(prefix),
+            })
+            by_date.setdefault(date_str, []).append(parsed)
+
+    def running_order(seg):
+        start = time_sort_key(seg['first_time']) or time_sort_key(prefix_start_times.get(seg['prefix']))
+        return (start is None, start or 0, seg['prefix'])
+
+    written = {}
+    for date_str, segments in by_date.items():
+        segments.sort(key=running_order)
+        banner = None
+        for seg in segments:
+            banner = find_banner(seg['path'])
+            if banner:
+                break
+        output_path = os.path.join(source_dir, f"combinedschedule_{date_str}.pdf")
+        try:
+            pages = create_combined_schedule_pdf(
+                output_path, datetime.strptime(date_str, "%Y%m%d"), segments,
+                banner=banner, withdrawn_by_prefix=prefix_withdrawn)
+            written[date_str] = output_path
+            print(f"  Combined schedule for {date_str}: {len(segments)} segment(s), {pages} page(s)")
+        except Exception as e:
+            print(f"  Error creating the combined schedule for {date_str}: {type(e).__name__}")
+    return written
+
 
 def process_judging_papers(source_dir, output_dir, options=None):
     if options is None:
@@ -341,6 +423,17 @@ def process_judging_papers(source_dir, output_dir, options=None):
             data['tasks'] = cleaned_tasks
 
     # ---------------------------------------------------------
+    # 2.6 Combined time schedule per day (optional add-on page)
+    # ---------------------------------------------------------
+    combined_schedules = {}
+    schedule_copies = combined_schedule_copies(options)
+    if schedule_copies:
+        print("\n[2.6] Creating combined time schedules...")
+        combined_schedules = build_combined_schedules(
+            source_dir, set(person_tasks.keys()), prefix_start_times,
+            prefix_segment_names, prefix_withdrawn)
+
+    # ---------------------------------------------------------
     # 3. Combine Papers
     # ---------------------------------------------------------
     print("\n[3/5] Combining Papers...")
@@ -539,6 +632,11 @@ def process_judging_papers(source_dir, output_dir, options=None):
             if os.path.exists(filepath):
                 daily_files.append(filepath)
         
+        # The day's combined time schedule at the end of the whole document,
+        # in as many copies as asked for
+        if daily_files and date_str in combined_schedules:
+            daily_files.extend([combined_schedules[date_str]] * schedule_copies)
+
         if daily_files:
             daily_output_filename = f"judgingpapers_{date_str}.pdf"
             daily_output_path = os.path.join(output_dir, daily_output_filename)
@@ -584,7 +682,8 @@ def process_judging_papers(source_dir, output_dir, options=None):
         stats = _compute_statistics(
             categories, schedule_entries, person_tasks, prefix_withdrawn,
             language, total_pages, withdrawn_pages_removed,
-            judging_method_overrides=judging_overrides
+            judging_method_overrides=judging_overrides,
+            combined_schedule_copies=schedule_copies if combined_schedules else 0
         )
     except Exception as e:
         print(f"  Warning: Failed to compute statistics: {e}")
@@ -595,7 +694,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
 
 def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withdrawn,
                         language, total_pages, withdrawn_pages_removed=0,
-                        judging_method_overrides=None):
+                        judging_method_overrides=None, combined_schedule_copies=0):
     """
     Build a usage-statistics dict from the structures accumulated during
     process_judging_papers. Stored on the competitions table row (which
@@ -696,4 +795,6 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
         "judging_method": _single_or_mixed(judging_methods),
         "language": language,
         "pages_generated": total_pages,
+        "combined_schedule": combined_schedule_copies > 0,
+        "combined_schedule_copies": combined_schedule_copies,
     }

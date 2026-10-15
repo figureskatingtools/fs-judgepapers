@@ -32,7 +32,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Import the dependencies
-        run: python -c "import azure.functions, azure.storage.blob, azure.identity, azure.data.tables, pypdf, reportlab, PIL"
+        run: python -c "import azure.functions, azure.storage.blob, azure.identity, azure.data.tables, pypdf, reportlab, PIL, pdfminer"
 
       - name: Byte-compile the backend
         run: python -m compileall -q infra/functions
