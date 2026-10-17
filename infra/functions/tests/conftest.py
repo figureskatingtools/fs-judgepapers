@@ -66,13 +66,16 @@ class AccessTables:
     def identity(self, tid=USER_TID, oid=USER_OID, user_id=USER_ID):
         self.identities.put(PartitionKey="IDENTITY", RowKey=f"{tid}_{oid}", UserId=user_id)
 
-    def grant(self, role, platform_id=PLATFORM_ID, user_id=USER_ID):
+    def grant(self, role, platform_id=PLATFORM_ID, user_id=USER_ID, clear_cache=True):
+        """Set (None: remove) a grant. `clear_cache=False` leaves the access
+        check's 30 s cache alone, as a real revoke on the platform would."""
         key = (platform_id.lower(), user_id)
         if role is None:
             self.grants.rows.pop(key, None)
         else:
             self.grants.put(PartitionKey=key[0], RowKey=user_id, Role=role)
-        platform_access.clear_cache()
+        if clear_cache:
+            platform_access.clear_cache()
 
 
 @pytest.fixture(autouse=True)

@@ -155,6 +155,30 @@ Errors (plain-text bodies starting with the code, like this tool's other
 | Read or write caller on an owner route | **403** `platform_owner_required: …` |
 | The access tables can't be read (unset `PLATFORM_STORAGE_ACCOUNT`, missing table, RBAC, network) | **503** `platform_unavailable: …` — fail closed, never a grant |
 
+## Rollout: revoke the old 5-day links
+
+Before this change every download link was a 5-day user-delegation SAS (the
+deployed app has only `AzureWebJobsStorage__accountName`, so the account-key
+branch never ran in Azure). Dropping the stored URLs does not invalidate links
+already handed out, so **right after this change is deployed to an
+environment**, revoke the account's user delegation keys (needs Storage Account
+Contributor or Owner on the account):
+
+```bash
+# test
+az storage account revoke-delegation-keys -g rg-fs-judgepapers-test -n stfsjudge6sk7jbtiojqc4
+# prod
+az storage account revoke-delegation-keys -g rg-fs-judgepapers-prod -n stfsjudgeyb6bgkpr7dehk
+```
+
+The account is `stfsjudge` + the same `uniqueString` suffix as the Function App
+(`func-fs-judgepapers-<suffix>`). Every user-delegation SAS on the account
+stops working at once, including the 15-minute links minted in the last
+minutes; the frontend fetches a fresh one on the next click. The e-mailed
+judges' papers links are unaffected: `download_judge_papers` signs its short
+SAS when the link is clicked. Run it after the deploy, never before: the old
+code would keep minting 5-day links.
+
 ## Local testing
 
 `func start` from `infra/functions/` serves the same routes on

@@ -196,9 +196,16 @@ def test_access_follows_the_object_id_not_the_email(competition, access):
     assert ROUTES["get_competition_details"][1](user_email="renamed@example.com").status_code == 200
 
 
-def test_a_revoked_grant_stops_working(competition, access):
+def test_a_revoked_grant_stops_working_when_the_cache_expires(competition, access, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(platform_access.time, "monotonic", lambda: clock[0])
     assert ROUTES["get_competition_details"][1]().status_code == 200
-    access.grant(None)
+
+    access.grant(None, clear_cache=False)
+    clock[0] += platform_access.CACHE_SECONDS - 1
+    assert ROUTES["get_competition_details"][1]().status_code == 200
+
+    clock[0] += 1
     assert ROUTES["get_competition_details"][1]().status_code == 404
 
 
