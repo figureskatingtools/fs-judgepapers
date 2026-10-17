@@ -22,10 +22,11 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # NB: the Bicep appSettings array is authoritative, so omitting --proxy-secret
-# sets the Function App's PROXY_SHARED_SECRET to empty, disabling the proxy gate
-# until the next CI deploy (which injects it from the GitHub environment secret).
+# sets the Function App's PROXY_SHARED_SECRET to empty. The gate fails closed,
+# so the backend then refuses every request (401) until the next CI deploy
+# (which injects it from the GitHub environment secret).
 if [ -z "$PROXY_SECRET" ]; then
-    echo "Warning: --proxy-secret not provided; the Web App -> Function proxy gate will be disabled until the next CI deploy."
+    echo "Warning: --proxy-secret not provided; the Function App will refuse every request (401) until the next CI deploy."
 fi
 if [ -z "$MAILGUN_API_KEY" ]; then
     echo "Warning: MAILGUN_API_KEY not set; the send e-mail feature only logs messages (dry run) until the next CI deploy."

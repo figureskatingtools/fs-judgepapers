@@ -7,6 +7,10 @@ table name behind `get_table_client`, one fake blob service behind
 fixture — a fake of the site's platform `competitions` table behind
 `get_platform_table_client`. Otherwise the platform clock is switched off,
 exactly like a deployment without PLATFORM_STORAGE_ACCOUNT.
+
+Competition access (platform_access.py) always runs against the `access`
+fixture's fake `useridentities` / `competitionaccess` tables: the default
+caller (USER_TID/USER_OID -> USER_ID) owns PLATFORM_ID, nothing else.
 """
 import json
 import os
@@ -20,11 +24,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import azure.functions as func  # noqa: E402
 
 import function_app as fa  # noqa: E402
+import platform_access  # noqa: E402
 from fakes import FakeBlobServiceClient, FakeTableClient  # noqa: E402
 
 PROXY_SECRET = "test-proxy-secret"
 USER_EMAIL = "operator@example.com"
 PLATFORM_ID = "0b6f3c1e-8d2a-4f5b-9c7e-1a2b3c4d5e6f"
+USER_TID = "72f988bf-86f1-41af-91ab-2d7cd011db47"
+USER_OID = "11111111-2222-4333-8444-555555555555"
+USER_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
 
 class Tables(dict):
@@ -46,6 +54,41 @@ def isolated(monkeypatch):
     monkeypatch.setattr(fa, "get_platform_container_client", lambda: None)
     monkeypatch.setattr(fa, "get_table_client", lambda *a, **kw: pytest.fail("use the tables fixture"))
     monkeypatch.setattr(fa, "get_blob_service_client", lambda: pytest.fail("use the blobs fixture"))
+
+
+class AccessTables:
+    """The platform's `useridentities` and `competitionaccess` tables."""
+
+    def __init__(self):
+        self.identities = FakeTableClient("useridentities")
+        self.grants = FakeTableClient("competitionaccess")
+
+    def identity(self, tid=USER_TID, oid=USER_OID, user_id=USER_ID):
+        self.identities.put(PartitionKey="IDENTITY", RowKey=f"{tid}_{oid}", UserId=user_id)
+
+    def grant(self, role, platform_id=PLATFORM_ID, user_id=USER_ID, clear_cache=True):
+        """Set (None: remove) a grant. `clear_cache=False` leaves the access
+        check's 30 s cache alone, as a real revoke on the platform would."""
+        key = (platform_id.lower(), user_id)
+        if role is None:
+            self.grants.rows.pop(key, None)
+        else:
+            self.grants.put(PartitionKey=key[0], RowKey=user_id, Role=role)
+        if clear_cache:
+            platform_access.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def access(monkeypatch):
+    """Fake platform access tables; the default caller owns PLATFORM_ID."""
+    tables = AccessTables()
+    tables.identity()
+    tables.grant("owner")
+    monkeypatch.setattr(platform_access, "get_identities_table_client", lambda: tables.identities)
+    monkeypatch.setattr(platform_access, "get_access_table_client", lambda: tables.grants)
+    platform_access.clear_cache()
+    yield tables
+    platform_access.clear_cache()
 
 
 @pytest.fixture
@@ -101,14 +144,22 @@ def put_competition(tables, comp_id="abc12345", name="Spring Cup", platform_id=N
 
 
 def make_request(method="GET", path="/api/x", *, body=None, params=None, headers=None,
-                 proxy_secret=PROXY_SECRET, user_email=USER_EMAIL):
+                 proxy_secret=PROXY_SECRET, user_email=USER_EMAIL, tid=USER_TID, oid=USER_OID,
+                 admin=False, raw_body=None):
+    """A request as the site router sends it; None leaves a header out."""
     request_headers = {}
     if proxy_secret is not None:
         request_headers["x-proxy-secret"] = proxy_secret
     if user_email is not None:
         request_headers["x-forwarded-user-email"] = user_email
+    if tid is not None:
+        request_headers["x-forwarded-user-tid"] = tid
+    if oid is not None:
+        request_headers["x-forwarded-user-oid"] = oid
+    if admin:
+        request_headers["x-forwarded-user-admin"] = "1"
     request_headers.update(headers or {})
-    payload_bytes = b""
+    payload_bytes = raw_body or b""
     if body is not None:
         payload_bytes = json.dumps(body).encode("utf-8")
         request_headers.setdefault("content-type", "application/json")
