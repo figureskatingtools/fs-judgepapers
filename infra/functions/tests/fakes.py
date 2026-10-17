@@ -104,7 +104,10 @@ class FakeTableClient:
     def upsert_entity(self, entity, mode=None):
         key = (entity["PartitionKey"], entity["RowKey"])
         self.calls.append(("upsert_entity", key))
-        self.rows.setdefault(key, {}).update(entity)
+        if str(getattr(mode, "value", mode)).lower() == "replace":
+            self.rows[key] = dict(entity)
+        else:
+            self.rows.setdefault(key, {}).update(entity)
 
     def delete_entity(self, partition_key, row_key):
         key = (partition_key, row_key)
@@ -192,6 +195,8 @@ class FakeContainerClient:
     def upload_blob(self, name, data, overwrite=False, metadata=None, **kwargs):
         if name in self.blobs and not overwrite:
             raise ResourceExistsError("blob already exists")
+        if hasattr(data, "read"):
+            data = data.read()
         if isinstance(data, str):
             data = data.encode("utf-8")
         self.blobs[name] = FakeBlob(name, data, metadata, self._tick())

@@ -124,7 +124,8 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
 |---|---|
 | none (signed in) | `check_user_permission`, `get_categories` |
 | read | `get_competition_details`, `resolve_competition` (incl. creating the empty bound record), `list_competitions` (filtered) |
-| write | `save_competition_settings`, `generate_judging_papers`, `preview_judge_papers_email`, `send_judge_papers`, `upload_file`, `import_platform_file`, `delete_file`, `delete_competition` |
+| write | `save_competition_settings`, `generate_judging_papers`, `preview_judge_papers_email`, `send_judge_papers`, `upload_file`, `import_platform_file`, `delete_file` |
+| owner | `delete_competition` — **POST only**, id from `?id=` or a JSON body `{"id"}` (405 for any other method) |
 
 - `list_competitions` returns only the records whose `PlatformId` the caller
   can read; an admin gets every live record (and only an admin's listing
@@ -132,7 +133,13 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
 - `resolve_competition` checks read access to the `platformId` first and
   **never adopts an unbound record by name** any more (that let anyone capture
   another user's record): it finds the record bound to that GUID or creates a
-  new one.
+  new one. The client-sent `name` renames an existing record only for a
+  caller with write or owner; a read caller gets the stored name back and
+  changes nothing.
+- `get_competition_details` lists the generated files with a fresh read-only
+  SAS link each (15 minutes, minted after the access check). Only the blob
+  name is stored (`generatedpapers.BlobName`); the 5-day SAS URLs older rows
+  hold are never returned (only their blob name is used).
 - A record with no `PlatformId` (pre-platform legacy) is **admin-only**.
 - An unknown or deleted (hidden) record is the same 404 as no access.
 - `CreatedBy` keeps the creator's e-mail as history only; ownership is the
@@ -145,6 +152,7 @@ Errors (plain-text bodies starting with the code, like this tool's other
 |---|---|
 | No access, unknown or deleted record, unbound record and caller not admin | **404** `platform_not_found: …` |
 | Read-only caller on a write route | **403** `platform_read_only: …` |
+| Read or write caller on an owner route | **403** `platform_owner_required: …` |
 | The access tables can't be read (unset `PLATFORM_STORAGE_ACCOUNT`, missing table, RBAC, network) | **503** `platform_unavailable: …` — fail closed, never a grant |
 
 ## Local testing

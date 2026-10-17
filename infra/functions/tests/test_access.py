@@ -105,7 +105,7 @@ ROUTES = {
     "delete_file": ("write", lambda **kw: call(
         fa.delete_file, make_request("POST", params={"competition": COMP_ID, "filename": SOURCE_FILE},
                                      **kw))),
-    "delete_competition": ("write", lambda **kw: call(
+    "delete_competition": ("owner", lambda **kw: call(
         fa.delete_competition, make_request("POST", params={"id": COMP_ID}, **kw))),
 }
 ROLES = (None, "read", "write", "owner", "admin")
@@ -134,6 +134,9 @@ def test_role_matrix(route, role, competition, tables, blobs, pool, access):
     if role is None:
         assert response.status_code == 404
         assert text(response).startswith("platform_not_found")
+    elif need == "owner":
+        assert response.status_code == 403
+        assert text(response).startswith("platform_owner_required")
     else:
         assert response.status_code == 403
         assert text(response).startswith("platform_read_only")
@@ -242,6 +245,62 @@ def test_an_unknown_record_is_the_same_404(tables, blobs):
 
     assert response.status_code == 404
     assert text(response).startswith("platform_not_found")
+
+
+# ---------------------------------------------------------------------------
+# delete_competition: POST only, owner only, id from the query or the body
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("method", ["GET", "DELETE", "PUT"])
+def test_delete_competition_is_post_only(method, competition, tables, blobs, pool):
+    before = snapshot(tables, blobs, pool)
+
+    response = call(fa.delete_competition, make_request(method, params={"id": COMP_ID}))
+
+    assert response.status_code == 405
+    assert response.headers["Allow"] == "POST"
+    assert snapshot(tables, blobs, pool) == before
+
+
+def test_delete_competition_route_declares_post_only():
+    # Not app.get_functions(): the app allows indexing only once per process.
+    bindings = fa.delete_competition._function.get_bindings_dict()["bindings"]
+    (trigger,) = [b for b in bindings if b.get("type") == "httpTrigger"]
+    assert [str(getattr(m, "value", m)).upper() for m in trigger["methods"]] == ["POST"]
+
+
+def test_delete_competition_takes_the_id_from_a_json_body(competition, tables):
+    response = call(fa.delete_competition, make_request("POST", body={"id": COMP_ID}))
+
+    assert response.status_code == 200, text(response)
+    assert tables["competitions"].row("GLOBAL", COMP_ID)["Visible"] is False
+
+
+@pytest.mark.parametrize("body", [None, {}, {"id": ""}, {"id": 12345}, ["x"]])
+def test_delete_competition_without_an_id_is_400(body, competition, tables):
+    response = call(fa.delete_competition, make_request("POST", body=body))
+
+    assert response.status_code == 400
+    assert tables["competitions"].row("GLOBAL", COMP_ID)["Visible"] is True
+
+
+def test_the_query_id_wins_over_the_body(competition, tables):
+    response = call(fa.delete_competition, make_request(
+        "POST", params={"id": "nope0000"}, body={"id": COMP_ID}))
+
+    assert response.status_code == 404
+    assert tables["competitions"].row("GLOBAL", COMP_ID)["Visible"] is True
+
+
+@pytest.mark.parametrize("role", ["read", "write"])
+def test_a_shared_user_cannot_delete_the_competition(role, competition, tables, access):
+    access.grant(role)
+
+    response = call(fa.delete_competition, make_request("POST", body={"id": COMP_ID}))
+
+    assert response.status_code == 403
+    assert text(response).startswith("platform_owner_required")
+    assert tables["competitions"].row("GLOBAL", COMP_ID)["Visible"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -487,3 +546,53 @@ def test_send_records_the_forwarded_email_only_for_audit(competition, tables, ac
     (row,) = tables["sentemails"].rows.values()
     assert row["SentBy"] == "writer@example.com"
     assert row["DryRun"] is True  # no MAILGUN_API_KEY in the tests
+
+
+# ---------------------------------------------------------------------------
+# resolve_competition renames only for write / owner
+# ---------------------------------------------------------------------------
+
+def _bound_record(tables, blobs):
+    row = put_competition(tables, comp_id=COMP_ID, name="Spring Cup", platform_id=PLATFORM_ID,
+                          deletion="2099-01-01T00:00:00Z")
+    blobs.upload_blob(f"{row['FolderPath']}/metadata.json",
+                      json.dumps({"id": COMP_ID, "name": "Spring Cup", "createdBy": USER_EMAIL}))
+    return row
+
+
+def _resolve_as(name, **kw):
+    return call(fa.resolve_competition, make_request(
+        "POST", body={"platformId": PLATFORM_ID, "name": name}, **kw))
+
+
+def test_a_reader_never_renames_the_record(tables, blobs, platform, access):
+    row = _bound_record(tables, blobs)
+    put_platform_competition(platform)
+    access.grant("read")
+
+    body = payload(_resolve_as("Hijacked Name"))
+
+    assert (body["id"], body["name"], body["created"]) == (COMP_ID, "Spring Cup", False)
+    assert tables["competitions"].row("GLOBAL", COMP_ID)["Name"] == "Spring Cup"
+    meta = json.loads(blobs.blobs[f"{row['FolderPath']}/metadata.json"].data)
+    assert meta["name"] == "Spring Cup"
+    assert not [u for u in tables["competitions"].updates() if "Name" in u[2]]
+
+
+@pytest.mark.parametrize("role", ["write", "owner", "admin"])
+def test_write_owner_and_admin_rename_the_record(role, tables, blobs, platform, access):
+    row = _bound_record(tables, blobs)
+    put_platform_competition(platform)
+    if role == "admin":
+        access.grant(None)
+        response = _resolve_as("Autumn Cup", admin=True)
+    else:
+        access.grant(role)
+        response = _resolve_as("Autumn Cup")
+
+    body = payload(response)
+
+    assert (body["id"], body["name"], body["created"]) == (COMP_ID, "Autumn Cup", False)
+    assert tables["competitions"].row("GLOBAL", COMP_ID)["Name"] == "Autumn Cup"
+    meta = json.loads(blobs.blobs[f"{row['FolderPath']}/metadata.json"].data)
+    assert meta["name"] == "Autumn Cup"
