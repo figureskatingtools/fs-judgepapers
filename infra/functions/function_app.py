@@ -3,11 +3,10 @@ import logging
 import os
 import tempfile
 import shutil
-import base64
 import json
 import re
+import hmac
 import secrets
-import unicodedata
 import io
 from pypdf import PdfReader
 from datetime import datetime
@@ -16,6 +15,7 @@ from azure.identity import DefaultAzureCredential
 from azure.core.exceptions import ResourceNotFoundError
 from azure.data.tables import TableClient, UpdateMode
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote
 from uuid import uuid4
 from processor import process_judging_papers
 from categories import (
@@ -38,6 +38,8 @@ from platform_clock import (
     read_platform_clock,
     to_iso_z,
 )
+import platform_access
+from platform_access import PlatformAccessUnavailable
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -78,105 +80,146 @@ DOWNLOAD_SAS_VALIDITY = timedelta(minutes=15)
 DEFAULT_PUBLIC_BASE_URL = "https://figureskatingtools.com"
 _SENDABLE_FILE_RE = re.compile(r"judgingpapers_[A-Za-z0-9_-]+\.pdf")
 
-def is_user_allowed(email: str) -> bool:
+class Caller:
     """
-    Check if the user is allowed to perform sensitive operations.
-    Policy for v1.0.0: All authenticated Entra ID users are allowed.
-    To restrict access, implement an allowlist here (e.g. from Table Storage or env var).
+    The signed-in user, as forwarded by the site router (PROXY-CONTRACT.md).
+    `tid`/`oid` (the Entra tenant and object id, lowercase GUIDs) are the
+    identity that access is decided on; `email` and `name` are for display
+    and audit only (CreatedBy, SentBy, importedBy) and never authorise
+    anything. `is_admin` is the router's x-forwarded-user-admin: 1, trusted
+    only because the proxy secret gate in front of it fails closed.
+    """
+
+    __slots__ = ("tid", "oid", "email", "name", "is_admin")
+
+    def __init__(self, tid, oid, email="", name="", is_admin=False):
+        self.tid = tid
+        self.oid = oid
+        self.email = email
+        self.name = name
+        self.is_admin = is_admin
+
+
+def is_user_allowed(caller) -> bool:
+    """
+    Tool-wide authorization hook, layered on top of the per-competition access
+    check (_competition_for): every authenticated user is allowed today.
     """
     return True
 
+
+def _header(req: func.HttpRequest, name: str) -> str:
+    """A request header by lowercase name, also tried in Title-Case ("" if absent)."""
+    value = req.headers.get(name)
+    if value is None:
+        value = req.headers.get("-".join(part.capitalize() for part in name.split("-")))
+    return value or ""
+
+
 def _proxy_secret_ok(req: func.HttpRequest) -> bool:
     """
-    Verify the request came from the Web App proxy by checking the shared
-    secret header. The function endpoint is public, so this prevents anyone
-    from spoofing the X-Forwarded-User-Email header directly.
+    Verify the request came from the site router by checking the shared
+    secret header. The function endpoint is public, so this is what stops
+    anyone from calling it directly with forged x-forwarded-user-* headers.
 
-    Enforced only when PROXY_SHARED_SECRET is set (so local dev and any
-    brief pre-rollout window fail open rather than locking everyone out).
+    Fails CLOSED: an empty PROXY_SHARED_SECRET rejects every request (only
+    GET health is ungated). Compared in constant time.
     """
-    expected = os.environ.get("PROXY_SHARED_SECRET")
+    expected = os.environ.get("PROXY_SHARED_SECRET") or ""
     if not expected:
-        return True
-    provided = req.headers.get("X-Proxy-Secret") or req.headers.get("x-proxy-secret")
-    return provided == expected
+        logging.error("PROXY_SHARED_SECRET is not set; rejecting the request")
+        return False
+    provided = _header(req, "x-proxy-secret")
+    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
-def _decode_jwt_payload(token: str) -> dict | None:
-    """Decode the payload of a JWT token without verification (base64 only)."""
-    try:
-        parts = token.split('.')
-        if len(parts) != 3:
-            return None
-        # JWT base64url decode (add padding)
-        payload_b64 = parts[1]
-        payload_b64 += '=' * (4 - len(payload_b64) % 4)
-        payload_bytes = base64.urlsafe_b64decode(payload_b64)
-        return json.loads(payload_bytes)
-    except Exception as e:
-        logging.error(f"Error decoding JWT payload: {e}")
-        return None
 
-def get_user_email_from_header(req: func.HttpRequest) -> str | None:
+def get_caller(req: func.HttpRequest) -> Caller | None:
     """
-    Extracts the user email from the X-MS-CLIENT-PRINCIPAL header 
-    injected by Azure Static Web Apps or App Service Auth,
-    or from the Authorization Bearer JWT token.
+    The caller, or None (-> 401). Identity comes ONLY from the headers the
+    router sets (x-forwarded-user-tid / -oid / -email / -name / -admin), and
+    only behind the proxy secret; there are no fallbacks (no Easy Auth
+    principal headers, no bearer tokens). A missing or non-GUID tid or oid
+    is unauthenticated.
     """
-    # 0. Reject requests that didn't come through the Web App proxy
     if not _proxy_secret_ok(req):
         logging.warning("Proxy shared secret missing or mismatched; rejecting request")
         return None
 
-    # 1. Try Direct Header (Standard Easy Auth)
-    val = req.headers.get("X-MS-CLIENT-PRINCIPAL-NAME") or req.headers.get("x-ms-client-principal-name")
-    if val:
-        logging.info("Authenticated via the Easy Auth principal-name header")
-        return val
+    tid = _header(req, "x-forwarded-user-tid").strip().lower()
+    oid = _header(req, "x-forwarded-user-oid").strip().lower()
+    if platform_access.identity_key(tid, oid) is None:
+        # Header names only: values can carry addresses and client IPs.
+        logging.warning(f"No valid forwarded identity. Header names: "
+                        f"{sorted(k.lower() for k in req.headers.keys())}")
+        return None
 
-    # 2. Try forwarded header from Web App proxy (server.js)
-    forwarded = req.headers.get("X-Forwarded-User-Email") or req.headers.get("x-forwarded-user-email")
-    if forwarded:
-        logging.info("Authenticated via the forwarded user header")
-        return forwarded
+    email = _header(req, "x-forwarded-user-email").strip().lower()
+    try:
+        name = unquote(_header(req, "x-forwarded-user-name")).strip()
+    except Exception:
+        name = ""
+    is_admin = _header(req, "x-forwarded-user-admin") == "1"
+    logging.info("Authenticated via the forwarded user headers")
+    return Caller(tid, oid, email=email, name=name, is_admin=is_admin)
 
-    # 3. Try Base64 Header (SWA / Advanced)
-    header = req.headers.get("x-ms-client-principal") or req.headers.get("X-MS-CLIENT-PRINCIPAL")
-    if header:
-        try:
-            decoded = base64.b64decode(header).decode("utf-8")
-            principal = json.loads(decoded)
-            email = principal.get("userDetails")
-            logging.info("Authenticated via the base64 client-principal header")
-            return email
-        except Exception as e:
-            logging.error(f"Error parsing auth header: {e}")
 
-    # 3. Try Authorization Bearer token (JWT id_token or access_token from App Service Easy Auth)
-    auth_header = req.headers.get("Authorization") or req.headers.get("authorization")
-    if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header[7:]
-        claims = _decode_jwt_payload(token)
-        if claims:
-            logging.info(f"JWT claims present: {list(claims.keys())}")
-            # Try standard email claims (works for work accounts)
-            email = claims.get("preferred_username") or claims.get("email") or claims.get("upn") or claims.get("unique_name")
-            # Personal accounts (live.com/outlook.com) may use 'emails' array
-            if not email:
-                emails = claims.get("emails")
-                if isinstance(emails, list) and emails:
-                    email = emails[0]
-            # Last resort: use 'name' or 'oid' as identity
-            if not email:
-                email = claims.get("name") or claims.get("oid")
-            if email:
-                logging.info("Authenticated via a bearer token")
-                return email
-            else:
-                logging.warning(f"JWT decoded but no usable identity claim found. Claims: {list(claims.keys())}")
+# Per-competition access (platform_access.py). Plain-text bodies starting with
+# the code, like this tool's other platform_* errors.
+_ACCESS_NOT_FOUND = "platform_not_found: no such competition, or you have no access to it"
+_ACCESS_READ_ONLY = "platform_read_only: you have view-only access to this competition"
+_ACCESS_UNAVAILABLE = "platform_unavailable: could not check access to this competition, try again"
 
-    # Header names only: values can carry addresses and client IPs.
-    logging.warning(f"No identity found. Header names: {sorted(k.lower() for k in req.headers.keys())}")
+
+def _access_error(caller, platform_id, need):
+    """
+    None when `caller` holds at least `need` ("read"/"write") on the platform
+    competition `platform_id`, else the error response: 404
+    platform_not_found for no access at all — and for a record bound to no
+    (valid) platform competition, which only an admin may touch — 403
+    platform_read_only for a read grant on a write route, 503
+    platform_unavailable when the access tables can't be read (fail closed).
+    """
+    guid = normalize_platform_id(platform_id)
+    if guid is None:
+        if caller.is_admin:
+            return None
+        return func.HttpResponse(_ACCESS_NOT_FOUND, status_code=404)
+    try:
+        role = platform_access.role_for(guid, caller.tid, caller.oid, is_admin=caller.is_admin)
+    except PlatformAccessUnavailable:
+        logging.error(f"Platform access unavailable for platform competition {guid}")
+        return func.HttpResponse(_ACCESS_UNAVAILABLE, status_code=503)
+    if role is None:
+        return func.HttpResponse(_ACCESS_NOT_FOUND, status_code=404)
+    if not platform_access.role_satisfies(role, need):
+        return func.HttpResponse(_ACCESS_READ_ONLY, status_code=403)
     return None
+
+
+def _competition_for(caller, comp_id, need):
+    """
+    (entity, None) when `comp_id` names a live record the caller holds `need`
+    on, else (None, error response). An unknown or deleted (hidden) record is
+    the same 404 as no access, so existence never leaks; a storage failure is
+    a retryable 503, never that 404 (the site clears its selection on
+    platform_not_found). Callers must run this before touching anything of
+    the competition.
+    """
+    entity = None
+    if comp_id and isinstance(comp_id, str):
+        try:
+            entity = _get_competition_entity_strict(comp_id)
+        except Exception as e:
+            logging.error(f"Could not read competition {comp_id}: {type(e).__name__}")
+            return None, func.HttpResponse("Temporarily unavailable, try again later", status_code=503,
+                                           headers={"Retry-After": "30"})
+    if not entity or entity.get("Visible") is False:
+        return None, func.HttpResponse(_ACCESS_NOT_FOUND, status_code=404)
+    error = _access_error(caller, entity.get("PlatformId"), need)
+    if error is not None:
+        return None, error
+    return entity, None
+
 
 # Liveness for the site's admin diagnostics: no sign-in, no secret, no storage
 # (the same shape as the platform API's /api/health).
@@ -188,13 +231,13 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="check_user_permission", auth_level=func.AuthLevel.ANONYMOUS)
 def check_user_permission(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Checking user permission...')
-    
-    email = get_user_email_from_header(req)
-    
-    if not email:
+
+    caller = get_caller(req)
+
+    if not caller:
         return func.HttpResponse(json.dumps({"allowed": False, "email": None}), mimetype="application/json", status_code=401)
 
-    return func.HttpResponse(json.dumps({"allowed": True, "email": email}), mimetype="application/json")
+    return func.HttpResponse(json.dumps({"allowed": True, "email": caller.email}), mimetype="application/json")
 
 
 def get_blob_service_client():
@@ -403,20 +446,6 @@ def sanitize_name(name: str) -> str:
     return "".join([c for c in name if c.isalnum() or c in (' ', '-', '_')]).strip()
 
 
-def normalize_competition_name(name) -> str:
-    """
-    Normalize a competition name for platform matching: NFKD diacritic folding,
-    alphanumerics only, casefold. Mirrors the site's shared-ui
-    `normalizeCompetitionCode` semantics so "Kevät Cup 2026" and
-    "kevatcup2026"-style variants collapse to the same key.
-    """
-    if not name:
-        return ""
-    decomposed = unicodedata.normalize("NFKD", str(name))
-    return "".join(c for c in decomposed
-                   if c.isalnum() and not unicodedata.combining(c)).casefold()
-
-
 def generate_competition_id(comp_table) -> str:
     """Generate a unique 8-char hex competition id (checked against the competitions table)."""
     for _ in range(5):
@@ -430,7 +459,7 @@ def generate_competition_id(comp_table) -> str:
 
 def _get_competition_entity_strict(comp_id: str):
     """
-    Like get_competition_entity, but only "not found" becomes None: any other
+    A competition entity by its id (RowKey), None when not found. Any other
     storage failure is raised, so a caller can answer a retryable 5xx instead
     of mistaking an outage for a deleted competition.
     """
@@ -440,20 +469,6 @@ def _get_competition_entity_strict(comp_id: str):
     try:
         return comp_table.get_entity(partition_key="GLOBAL", row_key=comp_id)
     except ResourceNotFoundError:
-        return None
-
-
-def get_competition_entity(comp_id: str):
-    """Look up a competition entity by its id (RowKey). Returns None if not found."""
-    try:
-        comp_table = get_table_client("competitions")
-        if not comp_table:
-            return None
-        return comp_table.get_entity(partition_key="GLOBAL", row_key=comp_id)
-    except ResourceNotFoundError:
-        return None
-    except Exception as e:
-        logging.error(f"Error fetching competition entity {comp_id}: {e}")
         return None
 
 
@@ -800,10 +815,16 @@ def create_and_store_sas_link(blob_service_client, container_name, blob_name, co
 
 @app.route(route="list_competitions", auth_level=func.AuthLevel.ANONYMOUS)
 def list_competitions(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    The records the caller may read: those bound to a platform competition
+    they hold a grant on (any role). Admins see every live record, including
+    unbound legacy ones; only an admin's listing re-keys legacy name-keyed rows.
+    503 `platform_unavailable` when access can't be checked (fail closed).
+    """
     logging.info('Listing competitions...')
-    
-    email = get_user_email_from_header(req)
-    if not email:
+
+    caller = get_caller(req)
+    if not caller:
         return func.HttpResponse("Unauthorized", status_code=401)
 
     try:
@@ -819,15 +840,24 @@ def list_competitions(req: func.HttpRequest) -> func.HttpResponse:
 
         competitions = []
         for entity in list(table_client.query_entities("PartitionKey eq 'GLOBAL'")):
-            # Lazily migrate legacy rows (RowKey = name) to the id-keyed schema
+            # Hide soft-deleted competitions
+            if entity.get("Visible") is False:
+                continue
+
+            # Lazily migrate legacy rows (RowKey = name) to the id-keyed
+            # schema. They are unbound, so only an admin can see them at all.
             if "FolderPath" not in entity:
+                if not caller.is_admin:
+                    continue
                 try:
                     entity = migrate_legacy_row(table_client, entity)
                 except Exception as e:
                     logging.error(f"Failed to migrate legacy competition '{entity['RowKey']}': {e}")
 
-            # Hide soft-deleted competitions
-            if entity.get("Visible") is False:
+            denied = _access_error(caller, entity.get("PlatformId"), "read")
+            if denied is not None:
+                if denied.status_code == 503:
+                    return denied
                 continue
 
             competitions.append({
@@ -936,44 +966,6 @@ def find_competition_by_platform_id(comp_table, platform_id, raw_platform_id=Non
     return entity
 
 
-def adopt_competition_by_name(comp_table, platform_id, name):
-    """
-    Link a pre-existing, unbound competition to a platform competition: a
-    visible row with no PlatformId whose normalized Name matches the platform
-    name gets PlatformId stamped on it (MERGE write) and is returned. Legacy
-    name-keyed rows (no FolderPath) are skipped — `list_competitions` re-keys
-    them, which would drop the binding. Returns None when nothing matches.
-    """
-    target = normalize_competition_name(name)
-    if not target:
-        return None
-
-    candidates = []
-    for entity in list(comp_table.query_entities("PartitionKey eq 'GLOBAL'")):
-        if entity.get("Visible") is False:
-            continue
-        if entity.get("PlatformId"):
-            continue
-        if "FolderPath" not in entity:
-            continue
-        if normalize_competition_name(entity.get("Name") or entity.get("RowKey")) != target:
-            continue
-        candidates.append(entity)
-
-    if not candidates:
-        return None
-
-    entity = _newest_competition(candidates)
-    comp_table.update_entity({
-        "PartitionKey": "GLOBAL",
-        "RowKey": entity["RowKey"],
-        "PlatformId": platform_id
-    }, mode=UpdateMode.MERGE)
-    entity["PlatformId"] = platform_id
-    logging.info(f"Adopted competition {entity['RowKey']} for platform id {platform_id}")
-    return entity
-
-
 def _sync_competition_name(comp_table, blob_service_client, entity, name):
     """
     Bring a platform-bound record's display Name in line with the platform
@@ -1024,16 +1016,19 @@ def resolve_competition_record(comp_table, blob_service_client, platform_id, nam
                                clock=None, clock_state=CLOCK_OK, raw_platform_id=None):
     """
     Core of POST /resolve_competition: platform-id lookup (syncing the stored
-    Name when the platform competition has been renamed) -> name adoption ->
-    create. Pure with respect to HTTP (clients are injected) so it can be driven
-    by fakes. `clock`/`clock_state` is the platform clock already read by the
-    caller: its deletion date is cached on the record.
+    Name when the platform competition has been renamed) -> create. Pure with
+    respect to HTTP (clients are injected) so it can be driven by fakes.
+    `clock`/`clock_state` is the platform clock already read by the caller:
+    its deletion date is cached on the record. The caller has already checked
+    that the user may read the platform competition.
 
-    A NEW binding (adoption or creation) needs a platform competition that
-    demonstrably exists — otherwise nothing would ever delete the record — so
-    it raises _PlatformBindingRefused when the registry says not found (404)
-    or can't be read (503). Only CLOCK_OFF (local dev, no registry configured)
-    binds without a date. Returns {id, name, created, deletionDate}.
+    Unbound records are never adopted by name any more: that let anyone with
+    any platform competition of the same name capture another user's record.
+    A NEW binding (creation) needs a platform competition that demonstrably
+    exists — otherwise nothing would ever delete the record — so it raises
+    _PlatformBindingRefused when the registry says not found (404) or can't
+    be read (503). Only CLOCK_OFF (local dev, no registry configured) binds
+    without a date. Returns {id, name, created, deletionDate}.
     """
     entity = find_competition_by_platform_id(comp_table, platform_id, raw_platform_id)
     if entity is not None:
@@ -1045,18 +1040,13 @@ def resolve_competition_record(comp_table, blob_service_client, platform_id, nam
         if clock_state == CLOCK_UNAVAILABLE:
             raise _PlatformBindingRefused(
                 503, "platform_unavailable: could not read the competition from the platform, try again")
-        entity = adopt_competition_by_name(comp_table, platform_id, name)
-        if entity is not None:
-            result_name = entity.get("Name", entity["RowKey"])
-            created = False
-        else:
-            result_name = sanitize_name(name)
-            platform_date = (clock or {}).get("deletionDate")
-            entity = create_competition_record(
-                comp_table, blob_service_client, result_name, email, platform_id,
-                deletion_date=to_iso_z(platform_date) if platform_date else None,
-            )
-            created = True
+        result_name = sanitize_name(name)
+        platform_date = (clock or {}).get("deletionDate")
+        entity = create_competition_record(
+            comp_table, blob_service_client, result_name, email, platform_id,
+            deletion_date=to_iso_z(platform_date) if platform_date else None,
+        )
+        created = True
 
     _sync_local_deletion_date(comp_table, entity, clock)
     return {
@@ -1080,17 +1070,19 @@ class _PlatformBindingRefused(Exception):
 def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     """
     Bind the site's active platform competition to this tool's competition
-    record: look it up by PlatformId (following platform renames), else adopt a
-    matching unbound record, else create one. Body {platformId, name} ->
-    {id, name, created, deletionDate} (the platform's date). 410
-    `platform_deleted` (and nothing created) when the platform competition was
-    deleted or purged; a new binding also needs the platform row to be
+    record: look it up by PlatformId (following platform renames), else create
+    one. Body {platformId, name} -> {id, name, created, deletionDate} (the
+    platform's date). Needs read access to the platform competition (404
+    `platform_not_found` without it, 503 `platform_unavailable` when access
+    can't be checked) — creating the empty bound record is allowed with read.
+    410 `platform_deleted` (and nothing created) when the platform competition
+    was deleted or purged; a new binding also needs the platform row to be
     readable (404 `platform_not_found` / 503 `platform_unavailable`).
     """
     logging.info('Resolving platform competition...')
 
-    email = get_user_email_from_header(req)
-    if not email:
+    caller = get_caller(req)
+    if not caller:
         return func.HttpResponse("Unauthorized", status_code=401)
 
     try:
@@ -1109,6 +1101,12 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Invalid platformId parameter", status_code=400)
     if not name or not sanitize_name(str(name)):
         return func.HttpResponse("Missing or invalid name parameter", status_code=400)
+
+    # Access before anything else, so a competition the caller can't see
+    # reveals nothing (not even that it was deleted) and gets no record.
+    denied = _access_error(caller, platform_id, "read")
+    if denied is not None:
+        return denied
 
     try:
         # The platform's retention clock first: a deleted/purged platform
@@ -1133,7 +1131,7 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
 
         try:
             result = resolve_competition_record(
-                comp_table, blob_service_client, platform_id, str(name), email,
+                comp_table, blob_service_client, platform_id, str(name), caller.email,
                 clock=clock, clock_state=clock_state, raw_platform_id=raw_platform_id,
             )
         except _PlatformBindingRefused as refused:
@@ -1221,8 +1219,8 @@ def _delete_competition_data(entity, deleted_by):
 def delete_competition(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Deleting competition...')
 
-    email = get_user_email_from_header(req)
-    if not email:
+    caller = get_caller(req)
+    if not caller:
         return func.HttpResponse("Unauthorized", status_code=401)
 
     comp_id = req.params.get('id')
@@ -1230,9 +1228,9 @@ def delete_competition(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Missing id parameter", status_code=400)
 
     try:
-        entity = get_competition_entity(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, denied = _competition_for(caller, comp_id, "write")
+        if denied is not None:
+            return denied
 
         count = _delete_competition_data(entity, USER_DELETE_ACTOR)
 
@@ -1416,9 +1414,9 @@ def _read_competition_metadata(container, folder_path):
 def get_categories(req: func.HttpRequest) -> func.HttpResponse:
     """Returns all competition categories from the categories table."""
     logging.info('Getting categories...')
-    
-    email = get_user_email_from_header(req)
-    if not email:
+
+    caller = get_caller(req)
+    if not caller:
         return func.HttpResponse("Unauthorized", status_code=401)
 
     try:
@@ -1432,19 +1430,19 @@ def get_categories(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="get_competition_details", auth_level=func.AuthLevel.ANONYMOUS)
 def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Getting competition details...')
-    
-    email = get_user_email_from_header(req)
-    if not email:
+
+    caller = get_caller(req)
+    if not caller:
         return func.HttpResponse("Unauthorized", status_code=401)
-        
+
     comp_id = req.params.get('id')
     if not comp_id:
         return func.HttpResponse("Missing id parameter", status_code=400)
 
     try:
-        entity = get_competition_entity(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, denied = _competition_for(caller, comp_id, "read")
+        if denied is not None:
+            return denied
 
         folder_path = entity.get("FolderPath", entity["RowKey"])
         display_name = entity.get("Name", folder_path)
@@ -1799,8 +1797,8 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
     """
     logging.info('Saving competition settings...')
 
-    email = get_user_email_from_header(req)
-    if not email:
+    caller = get_caller(req)
+    if not caller:
         return func.HttpResponse("Unauthorized", status_code=401)
 
     try:
@@ -1830,9 +1828,9 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
             )
 
     try:
-        entity = get_competition_entity(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, denied = _competition_for(caller, comp_id, "write")
+        if denied is not None:
+            return denied
 
         folder_path = entity.get("FolderPath", entity["RowKey"])
 
@@ -1867,11 +1865,11 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request.')
 
     # 1. Security Check
-    email = get_user_email_from_header(req)
-    
-    if not email:
+    caller = get_caller(req)
+
+    if not caller:
         return func.HttpResponse("Unauthorized", status_code=401)
-    if not is_user_allowed(email):
+    if not is_user_allowed(caller):
         return func.HttpResponse("Forbidden: You are not on the allow list.", status_code=403)
 
     try:
@@ -1890,9 +1888,9 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
     if not comp_id:
         return func.HttpResponse("Please pass a workingFolder in the request body", status_code=400)
 
-    entity = get_competition_entity(comp_id)
-    if not entity:
-        return func.HttpResponse("Competition not found", status_code=404)
+    entity, denied = _competition_for(caller, comp_id, "write")
+    if denied is not None:
+        return denied
 
     working_folder = entity.get("FolderPath", entity["RowKey"])
 
@@ -2007,11 +2005,12 @@ def _parse_send_request(req: func.HttpRequest, require_recipients: bool):
     Returns (context dict, None) or (None, error HttpResponse). The preview
     passes require_recipients=False: it renders before the addresses are typed.
     """
-    email = get_user_email_from_header(req)
-    if not email:
+    caller = get_caller(req)
+    if not caller:
         return None, func.HttpResponse("Unauthorized", status_code=401)
-    if not is_user_allowed(email):
+    if not is_user_allowed(caller):
         return None, func.HttpResponse("Forbidden", status_code=403)
+    email = caller.email
 
     try:
         req_body = req.get_json()
@@ -2042,9 +2041,9 @@ def _parse_send_request(req: func.HttpRequest, require_recipients: bool):
     if language not in email_sender.LANGUAGES:
         return None, func.HttpResponse("Invalid language", status_code=400)
 
-    entity = get_competition_entity(comp_id)
-    if not entity or entity.get("Visible") is False:
-        return None, func.HttpResponse("Competition not found", status_code=404)
+    entity, denied = _competition_for(caller, comp_id, "write")
+    if denied is not None:
+        return None, denied
 
     # The file must be one this competition actually generated: never mint
     # a SAS for an arbitrary blob name taken from the request.
@@ -2316,9 +2315,9 @@ def download_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="upload_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def upload_file(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Uploading file...')
-    
-    email = get_user_email_from_header(req)
-    if not email:
+
+    caller = get_caller(req)
+    if not caller:
         return func.HttpResponse("Unauthorized", status_code=401)
         
     competition = req.params.get('competition')
@@ -2345,9 +2344,9 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(f"File too large. Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.", status_code=413)
 
         # 'competition' carries the competition id; resolve the blob folder from the table
-        entity = get_competition_entity(competition)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, denied = _competition_for(caller, competition, "write")
+        if denied is not None:
+            return denied
 
         folder_path = entity.get("FolderPath", entity["RowKey"])
 
@@ -2380,8 +2379,8 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
     """
     logging.info('Importing file from the platform file pool...')
 
-    email = get_user_email_from_header(req)
-    if not email:
+    caller = get_caller(req)
+    if not caller:
         return func.HttpResponse("Unauthorized", status_code=401)
 
     competition = req.params.get('competition')
@@ -2403,9 +2402,9 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
     if not filename.lower().endswith('.pdf'):
         return func.HttpResponse("Only PDF files are allowed", status_code=400)
 
-    entity = get_competition_entity(competition)
-    if not entity:
-        return func.HttpResponse("Competition not found", status_code=404)
+    entity, denied = _competition_for(caller, competition, "write")
+    if denied is not None:
+        return denied
 
     raw_platform_id = entity.get("PlatformId")
     if not raw_platform_id:
@@ -2465,7 +2464,7 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
     metadata = {
         "poolSource": source,
         "poolUploadedUtc": _iso_utc(getattr(properties, "last_modified", None)),
-        "importedBy": email,
+        "importedBy": caller.email,
     }
 
     try:
@@ -2494,9 +2493,9 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="delete_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["DELETE", "POST"])
 def delete_file(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Deleting file...')
-    
-    email = get_user_email_from_header(req)
-    if not email:
+
+    caller = get_caller(req)
+    if not caller:
         return func.HttpResponse("Unauthorized", status_code=401)
         
     competition = req.params.get('competition')
@@ -2507,9 +2506,9 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         # 'competition' carries the competition id; resolve the blob folder from the table
-        entity = get_competition_entity(competition)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, denied = _competition_for(caller, competition, "write")
+        if denied is not None:
+            return denied
 
         folder_path = entity.get("FolderPath", entity["RowKey"])
 

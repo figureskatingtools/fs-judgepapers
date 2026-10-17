@@ -1,7 +1,6 @@
 """The send flow caps the e-mailed link at the effective (platform) deletion
 date, download links of deleted data answer 410, and no address reaches the
 logs."""
-import base64
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -88,7 +87,7 @@ def test_an_unreachable_platform_falls_back_to_the_cached_date(sendable, platfor
 
 
 def test_a_far_deletion_date_keeps_the_five_day_link(sendable):
-    sendable(deletion=iso(from_now(days=30)))
+    sendable(platform_id=PLATFORM_ID, deletion=iso(from_now(days=30)))
 
     expiry = fa._parse_iso_utc(payload(send())["expiryDate"])
 
@@ -106,7 +105,7 @@ def test_the_preview_uses_the_same_cap(sendable, platform):
 
 
 def test_sending_logs_no_addresses(sendable, caplog):
-    sendable(deletion=iso(from_now(days=30)))
+    sendable(platform_id=PLATFORM_ID, deletion=iso(from_now(days=30)))
 
     with caplog.at_level(logging.DEBUG):
         assert send().status_code == 200
@@ -184,16 +183,9 @@ def test_an_expired_link_is_410(link, tables):
 # Logs and the e-mail template
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("headers", [
-    {"x-forwarded-user-email": USER_EMAIL},
-    {"x-ms-client-principal-name": USER_EMAIL},
-    {"x-ms-client-principal": base64.b64encode(
-        f'{{"userDetails": "{USER_EMAIL}"}}'.encode()).decode()},
-])
-def test_authentication_logs_no_address(headers, caplog):
+def test_authentication_logs_no_address(caplog):
     with caplog.at_level(logging.DEBUG):
-        response = call(fa.check_user_permission,
-                        make_request(headers=headers, user_email=None))
+        response = call(fa.check_user_permission, make_request())
     assert payload(response)["email"] == USER_EMAIL
     assert USER_EMAIL not in "\n".join(r.getMessage() for r in caplog.records)
 
@@ -201,7 +193,8 @@ def test_authentication_logs_no_address(headers, caplog):
 def test_a_request_without_identity_logs_header_names_only(caplog):
     with caplog.at_level(logging.DEBUG):
         call(fa.check_user_permission,
-             make_request(user_email=None, headers={"x-forwarded-for": "203.0.113.9"}))
+             make_request(user_email=None, tid=None, oid=None,
+                          headers={"x-forwarded-for": "203.0.113.9"}))
     messages = "\n".join(r.getMessage() for r in caplog.records)
     assert "x-forwarded-for" in messages
     assert "203.0.113.9" not in messages

@@ -207,6 +207,9 @@ class FakeContainerClient:
             raise ResourceNotFoundError("blob not found")
         del self.blobs[name]
 
+    def download_blob(self, name):
+        return FakeBlobClient(self, name).download_blob()
+
     def get_blob_client(self, name):
         return FakeBlobClient(self, name)
 
