@@ -5,9 +5,9 @@ param appInsightsName string
 param storageAccountName string
 param deploymentContainerUrl string
 
-// Shared secret the site router proxy sends as X-Proxy-Secret. Empty = the
-// function doesn't enforce it (local/dev). See function_app.py:_proxy_secret_ok
-// and PROXY-CONTRACT.md.
+// Shared secret the site router proxy sends as X-Proxy-Secret. Required: empty =
+// the function refuses every request (fail closed; only GET health answers).
+// See function_app.py:_proxy_secret_ok and PROXY-CONTRACT.md.
 @secure()
 param proxySharedSecret string = ''
 

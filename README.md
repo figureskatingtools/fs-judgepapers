@@ -18,12 +18,12 @@ A web application for generating judging packets for figure skating competitions
 
 1. **Upload** — Source PDF files are uploaded via the web UI to Azure Blob Storage
 2. **Process** — Azure Function splits judge sheets, creates cover pages, and merges documents into per-judge packets
-3. **Download** — Generated packets are stored in Blob Storage with SAS-linked download URLs
+3. **Download** — Generated packets are stored in Blob Storage; each view of the competition gives fresh download links valid for 15 minutes
 4. **Send** — A merged judges'-papers PDF can be e-mailed (via Mailgun) to e.g. the competition manager: a predefined Finnish or English message with a 5-day download link on figureskatingtools.com (it redirects to the PDF, so no storage URL appears in the mail), CC'd to the Results Service e-mail
 
 ### Authentication
 
-Sign-in is Microsoft Entra ID enforced by App Service Easy Auth on [figureskatingtools.com](https://figureskatingtools.com), which hosts every tool under its own path. One session covers all of them. The Function App deployed from this repo is anonymous at the platform level; the site router authenticates calls to it with a forwarded identity header (`x-forwarded-user-email`) plus a shared secret (`x-proxy-secret`) — see [PROXY-CONTRACT.md](PROXY-CONTRACT.md).
+Sign-in is Microsoft Entra ID enforced by App Service Easy Auth on [figureskatingtools.com](https://figureskatingtools.com), which hosts every tool under its own path. One session covers all of them. The Function App deployed from this repo is anonymous at the platform level; the site router authenticates calls to it with forwarded identity headers (the Entra tenant and object id, `x-forwarded-user-tid` / `x-forwarded-user-oid`, plus e-mail and name for display) and a shared secret (`x-proxy-secret`, required — the backend refuses every request without it). Each competition is private to its owner and the users it is shared with on the site: this backend checks the platform's grants (read or write) on every route that touches a competition — see [PROXY-CONTRACT.md](PROXY-CONTRACT.md).
 
 ## Features
 
@@ -110,10 +110,15 @@ Deployed from the figureskatingtools-site repo, not from here.
       "IsEncrypted": false,
       "Values": {
         "AzureWebJobsStorage": "<YOUR_STORAGE_CONNECTION_STRING>",
-        "FUNCTIONS_WORKER_RUNTIME": "python"
+        "FUNCTIONS_WORKER_RUNTIME": "python",
+        "PROXY_SHARED_SECRET": "local-dev-secret"
       }
     }
     ```
+    `PROXY_SHARED_SECRET` is required: without it every request is refused
+    (401). Without `PLATFORM_STORAGE_ACCOUNT` the competition access check
+    can't run, so only admin calls (`x-forwarded-user-admin: 1`) work locally
+    — see [PROXY-CONTRACT.md](PROXY-CONTRACT.md#local-testing).
     Optional: `MAILGUN_API_KEY` (without it `send_judge_papers` only logs the
     subject and recipients instead of sending — the body isn't logged because
     it holds a live download link; use the send dialog's Preview to see it), `EXAMPLE_VIDEO_URL`, and the

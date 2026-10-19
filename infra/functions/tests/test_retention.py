@@ -71,16 +71,16 @@ def test_a_new_record_before_the_platform_has_a_date_gets_none(tables, blobs, pl
     assert "DeletionDate" not in tables["competitions"].row("GLOBAL", body["id"])
 
 
-def test_an_adopted_record_is_synced_too(tables, blobs, platform):
+def test_an_unbound_record_of_the_same_name_is_never_adopted(tables, blobs, platform):
     put_competition(tables, name="Spring Cup", deletion="2027-02-01T10:00:00Z")
     put_platform_competition(platform, deletion="2026-12-01T00:00:00Z")
 
     body = payload(resolve("Spring Cup"))
 
-    assert body["id"] == "abc12345" and body["created"] is False
-    row = tables["competitions"].row("GLOBAL", "abc12345")
-    assert row["PlatformId"] == PLATFORM_ID
-    assert row["DeletionDate"] == "2026-12-01T00:00:00Z"
+    assert body["id"] != "abc12345" and body["created"] is True
+    assert "PlatformId" not in tables["competitions"].row("GLOBAL", "abc12345")
+    assert tables["competitions"].row("GLOBAL", body["id"])["PlatformId"] == PLATFORM_ID
+    assert not hasattr(fa, "adopt_competition_by_name")
 
 
 @pytest.mark.parametrize("status, purged", [("deleted", None), ("deleted", "2026-10-10T03:00:00Z"),
@@ -426,7 +426,8 @@ def test_auto_deletion_leaves_no_address_on_the_row(tables, blobs, platform, swe
 def test_a_manual_delete_records_user_not_the_address(tables, blobs):
     seed(tables, blobs, "manual01")
 
-    response = call(fa.delete_competition, make_request("POST", params={"id": "manual01"}))
+    # An unbound (pre-platform) record: only an admin may touch it.
+    response = call(fa.delete_competition, make_request("POST", params={"id": "manual01"}, admin=True))
 
     assert response.status_code == 200
     row = stored(tables, "manual01")
