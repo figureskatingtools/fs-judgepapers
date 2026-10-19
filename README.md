@@ -19,6 +19,7 @@ A web application for generating judging packets for figure skating competitions
 1. **Upload** — Source PDF files are uploaded via the web UI to Azure Blob Storage
 2. **Process** — Azure Function splits judge sheets, creates cover pages, and merges documents into per-judge packets
 3. **Download** — Generated packets are stored in Blob Storage; each view of the competition gives fresh download links valid for 15 minutes
+   - **Copy link** gives a 5-day link to share anywhere (chat, WhatsApp, …): the same figureskatingtools.com link as the e-mail, capped at the competition's deletion date
 4. **Send** — A merged judges'-papers PDF can be e-mailed (via Mailgun) to e.g. the competition manager: a predefined Finnish or English message with a 5-day download link on figureskatingtools.com (it redirects to the PDF, so no storage URL appears in the mail), CC'd to the Results Service e-mail
 
 ### Authentication

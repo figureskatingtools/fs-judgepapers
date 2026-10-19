@@ -87,8 +87,9 @@ must call `get_caller(req)` and return **401** when it returns `None`.
 the site's admin diagnostics (the router pings it with the secret anyway).
 
 **`GET download_judge_papers`** needs no identity. It serves the link e-mailed by
-`send_judge_papers` (`https://figureskatingtools.com/judgepapers/download?t=<token>`),
-and the recipient isn't signed in. The router proxies that exact public path
+`send_judge_papers` or copied through `create_download_link`
+(`https://figureskatingtools.com/judgepapers/download?t=<token>`), and the
+recipient isn't signed in. The router proxies that exact public path
 (excluded from Easy Auth) to `/api/download_judge_papers?t=<token>` without a
 user header; the endpoint still requires the shared secret (`_proxy_secret_ok()`,
 fail closed, 401), then resolves the 32-character token against the
@@ -123,7 +124,7 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
 | Need | Routes |
 |---|---|
 | none (signed in) | `check_user_permission`, `get_categories` |
-| read | `get_competition_details`, `resolve_competition` (incl. creating the empty bound record), `list_competitions` (filtered) |
+| read | `get_competition_details`, `create_download_link`, `resolve_competition` (incl. creating the empty bound record), `list_competitions` (filtered) |
 | write | `save_competition_settings`, `generate_judging_papers`, `preview_judge_papers_email`, `send_judge_papers`, `upload_file`, `import_platform_file`, `delete_file` |
 | owner | `delete_competition` — **POST only**, id from `?id=` or a JSON body `{"id"}` (405 for any other method) |
 
@@ -140,6 +141,16 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
   SAS link each (15 minutes, minted after the access check). Only the blob
   name is stored (`generatedpapers.BlobName`); the 5-day SAS URLs older rows
   hold are never returned (only their blob name is used).
+- `create_download_link` (**POST only**, body `{"id", "fileName"}` →
+  `{"url", "expiration"}`) is the site's "Copy link": the same public token
+  link as the e-mail, for sharing anywhere, with the same lifetime (5 days,
+  capped at the competition's effective deletion date; 409 under an hour, 410
+  `platform_deleted`). Any generated file (merged PDF or ZIP) with a
+  `generatedpapers` row and its blob (404 otherwise). It needs only **read**:
+  a reader can already download the file and pass it on. Nothing is sent; the
+  `sentemails` row has `Channel: "link"`, `SentBy`/`SentByOid` and no
+  recipients. 100 links per user per 24 h (429, counted by `SentByOid`;
+  fails closed with 503); links don't count toward the e-mail limit.
 - A record with no `PlatformId` (pre-platform legacy) is **admin-only**.
 - An unknown or deleted (hidden) record is the same 404 as no access.
 - `CreatedBy` keeps the creator's e-mail as history only; ownership is the
