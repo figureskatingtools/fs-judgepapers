@@ -83,6 +83,13 @@ GENERATED_LINK_VALIDITY = timedelta(minutes=15)
 GENERATED_CONTAINER = "fs-judgepapers"
 DEFAULT_PUBLIC_BASE_URL = "https://figureskatingtools.com"
 _SENDABLE_FILE_RE = re.compile(r"judgingpapers_[A-Za-z0-9_-]+\.pdf")
+# "Copy link" (create_download_link): the e-mail's token link, for sharing
+# anywhere (WhatsApp, …) — same lifetime rules, any generated file (merged PDF
+# or ZIP), no recipients. Its sentemails row has Channel "link" and the
+# creator's object id, which its own per-user daily limit counts.
+LINK_CHANNEL = "link"
+LINK_RATE_LIMIT_PER_DAY = 100
+_LINKABLE_FILE_RE = re.compile(r"[A-Za-z0-9_-]+\.(?:pdf|zip)", re.IGNORECASE)
 
 class Caller:
     """
@@ -621,7 +628,7 @@ def _deletion_date_value(entity, clock):
 
 
 def _bump_competition_counters(comp_id, uploaded_delta=0, generate_delta=0, set_last_generated=False,
-                               email_sent_delta=0):
+                               email_sent_delta=0, link_created_delta=0):
     """
     Best-effort update of usage counters on the competitions entity.
     Never raises — counter failures must not fail the user's operation.
@@ -640,6 +647,8 @@ def _bump_competition_counters(comp_id, uploaded_delta=0, generate_delta=0, set_
             update["LastGeneratedDate"] = f"{datetime.utcnow().isoformat()}Z"
         if email_sent_delta:
             update["EmailSentCount"] = int(entity.get("EmailSentCount", 0)) + email_sent_delta
+        if link_created_delta:
+            update["LinkCreatedCount"] = int(entity.get("LinkCreatedCount", 0)) + link_created_delta
         comp_table.update_entity(update, mode=UpdateMode.MERGE)
     except Exception as e:
         logging.warning(f"Failed to update counters for competition {comp_id}: {e}")
@@ -2095,12 +2104,52 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
         if 'temp_dir' in locals() and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 def _sends_in_last_day(sent_table, email):
-    """Number of e-mails this user sent in the last 24 h (any competition)."""
+    """Number of e-mails this user sent in the last 24 h (any competition).
+    Copied links (Channel "link") have their own limit and don't count here."""
     since = _iso_utc(datetime.now(timezone.utc) - timedelta(days=1))
     safe_email = email.replace("'", "''")
     rows = sent_table.query_entities(
-        f"SentBy eq '{safe_email}' and SentDate ge '{since}'", select=["RowKey"])
+        f"SentBy eq '{safe_email}' and SentDate ge '{since}'", select=["RowKey", "Channel"])
+    return sum(1 for row in rows if row.get("Channel") != LINK_CHANNEL)
+
+
+def _links_in_last_day(sent_table, oid):
+    """Number of links this user created in the last 24 h (any competition)."""
+    since = _iso_utc(datetime.now(timezone.utc) - timedelta(days=1))
+    rows = sent_table.query_entities(
+        f"SentByOid eq '{oid}' and SentDate ge '{since}'", select=["RowKey"])
     return sum(1 for _ in rows)
+
+
+def _link_expiry(entity, refusal):
+    """
+    (now, expiry, None) for a new download link of `entity` — the e-mailed one
+    and the copied one alike — or (None, None, error response). Fresh 5 days,
+    but never outliving the competition's auto-deletion: the platform's date
+    for a bound record (the local one when the platform can't be read), else
+    this tool's own. 410 platform_deleted for a deleted platform competition,
+    409 when under SEND_MIN_LINK_VALIDITY remains (`refusal` ends that message).
+    """
+    clock, _clock_state = _read_platform_clock_state(entity.get("PlatformId"))
+    if _platform_deleted(clock):
+        return None, None, func.HttpResponse(
+            "platform_deleted: this competition has been deleted", status_code=410)
+    now = datetime.now(timezone.utc)
+    expiry = now + timedelta(days=SEND_LINK_VALIDITY_DAYS)
+    deletion = effective_deletion(entity.get("DeletionDate"), clock)
+    if deletion and deletion < expiry:
+        expiry = deletion
+    if expiry - now < SEND_MIN_LINK_VALIDITY:
+        return None, None, func.HttpResponse(
+            f"The competition is about to be deleted; extend its retention {refusal}",
+            status_code=409)
+    return now, expiry, None
+
+
+def _public_download_url(token):
+    """The public link download_judge_papers resolves (never a storage URL)."""
+    base_url = (os.environ.get("PUBLIC_BASE_URL") or DEFAULT_PUBLIC_BASE_URL).rstrip("/")
+    return f"{base_url}/judgepapers/download?t={token}"
 
 
 def _parse_send_request(req: func.HttpRequest, require_recipients: bool):
@@ -2159,22 +2208,9 @@ def _parse_send_request(req: func.HttpRequest, require_recipients: bool):
     except ResourceNotFoundError:
         return None, func.HttpResponse("Generated file not found", status_code=404)
 
-    # Fresh link, but never outliving the competition's auto-deletion: the
-    # platform's date for a bound record (the local one when the platform
-    # can't be read), else this tool's own.
-    clock, _clock_state = _read_platform_clock_state(entity.get("PlatformId"))
-    if _platform_deleted(clock):
-        return None, func.HttpResponse(
-            "platform_deleted: this competition has been deleted", status_code=410)
-    now = datetime.now(timezone.utc)
-    expiry = now + timedelta(days=SEND_LINK_VALIDITY_DAYS)
-    deletion = effective_deletion(entity.get("DeletionDate"), clock)
-    if deletion and deletion < expiry:
-        expiry = deletion
-    if expiry - now < SEND_MIN_LINK_VALIDITY:
-        return None, func.HttpResponse(
-            "The competition is about to be deleted; extend its retention before sending",
-            status_code=409)
+    now, expiry, error = _link_expiry(entity, "before sending")
+    if error is not None:
+        return None, error
 
     return {
         "email": email,
@@ -2249,8 +2285,7 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         # The audit row doubles as the download link: its RowKey is the token
         # download_judge_papers resolves, so it is written before sending.
         token = secrets.token_urlsafe(24)
-        base_url = (os.environ.get("PUBLIC_BASE_URL") or DEFAULT_PUBLIC_BASE_URL).rstrip("/")
-        url = f"{base_url}/judgepapers/download?t={token}"
+        url = _public_download_url(token)
         sent_table.create_entity({
             "PartitionKey": comp_id,
             "RowKey": token,
@@ -2323,6 +2358,123 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Internal server error", status_code=500)
 
 
+@app.route(route="create_download_link", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def create_download_link(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    "Copy link": a download link of one generated file to share anywhere
+    (WhatsApp, a chat, …). Body {id, fileName} -> {url, expiration}.
+
+    The same public /judgepapers/download?t=<token> link the e-mail carries,
+    with the same lifetime (_link_expiry: 5 days, capped at the competition's
+    effective deletion date; 409 under an hour, 410 platform_deleted), served
+    unchanged by download_judge_papers. Any generated file (merged PDF or
+    ZIP) with a generatedpapers row. Read access is enough: a reader can
+    download the file and pass it on anyway. Nothing is sent; the sentemails
+    row (Channel "link", no recipients) is the link and its audit, deleted
+    with the competition. LINK_RATE_LIMIT_PER_DAY links per user per 24 h,
+    counted after writing like the e-mail limit, failing closed (503).
+    """
+    if req.method.upper() != "POST":
+        return func.HttpResponse("Method not allowed", status_code=405, headers={"Allow": "POST"})
+
+    caller = get_caller(req)
+    if not caller:
+        return func.HttpResponse("Unauthorized", status_code=401)
+    if not is_user_allowed(caller):
+        return func.HttpResponse("Forbidden", status_code=403)
+
+    try:
+        req_body = req.get_json()
+    except ValueError:
+        req_body = None
+    if not isinstance(req_body, dict):
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    comp_id = req_body.get('id')
+    file_name = req_body.get('fileName')
+    if not comp_id or not isinstance(comp_id, str):
+        return func.HttpResponse("Missing id parameter", status_code=400)
+    if not isinstance(file_name, str) or not _LINKABLE_FILE_RE.fullmatch(file_name):
+        return func.HttpResponse("Only generated judges' papers can be linked", status_code=400)
+
+    try:
+        entity, denied = _competition_for(caller, comp_id, "read")
+        if denied is not None:
+            return denied
+
+        # Only a file this competition actually generated, like the e-mail.
+        papers_table = get_table_client()
+        if not papers_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+        try:
+            papers_table.get_entity(partition_key=comp_id, row_key=file_name)
+        except ResourceNotFoundError:
+            return func.HttpResponse("Generated file not found", status_code=404)
+
+        now, expiry, error = _link_expiry(entity, "before sharing a link")
+        if error is not None:
+            return error
+
+        blob_service_client = get_blob_service_client()
+        if not blob_service_client:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+        folder_path = entity.get("FolderPath", comp_id).strip("/")
+        blob_name = f"{folder_path}/judgePapers/{file_name}"
+        if not blob_service_client.get_container_client(GENERATED_CONTAINER).get_blob_client(blob_name).exists():
+            return func.HttpResponse("Generated file not found", status_code=404)
+
+        sent_table = get_table_client("sentemails")
+        if not sent_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+        try:
+            sent_table.create_table()
+        except Exception:
+            pass
+
+        token = secrets.token_urlsafe(24)
+        sent_table.create_entity({
+            "PartitionKey": comp_id,
+            "RowKey": token,
+            "Channel": LINK_CHANNEL,
+            "SentBy": caller.email,
+            "SentByOid": caller.oid,
+            "To": "",
+            "Cc": "",
+            "FileName": file_name,
+            "Language": "",
+            "SentDate": _iso_utc(now),
+            "LinkExpiry": _iso_utc(expiry),
+            "MailgunId": "",
+            "DryRun": False,
+        })
+
+        # Counted after writing our own row, like the e-mail limit; fails closed.
+        try:
+            over_limit = _links_in_last_day(sent_table, caller.oid) > LINK_RATE_LIMIT_PER_DAY
+        except Exception as e:
+            logging.error(f"Link rate-limit check failed: {e}")
+            over_limit = None
+        if over_limit is not False:
+            try:
+                sent_table.delete_entity(partition_key=comp_id, row_key=token)
+            except Exception as de:
+                logging.warning(f"Failed to remove the refused link's row: {de}")
+            if over_limit is None:
+                return func.HttpResponse("Could not check the link limit, try again later", status_code=503)
+            return func.HttpResponse(
+                f"Daily limit of {LINK_RATE_LIMIT_PER_DAY} links reached, try again later",
+                status_code=429)
+
+        logging.info(f"Created a download link of {file_name} in {comp_id}")
+        _bump_competition_counters(comp_id, link_created_delta=1)
+        return func.HttpResponse(json.dumps({
+            "url": _public_download_url(token),
+            "expiration": _iso_utc(expiry),
+        }), mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Error creating a judges' papers download link: {e}", exc_info=True)
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
 _DOWNLOAD_NOT_FOUND = ("Linkkiä ei löydy tai tiedosto on poistettu.\n"
                        "This link is invalid or the file has been removed.\n")
 _DOWNLOAD_EXPIRED = ("Linkki on vanhentunut. Pyydä lähettäjältä uusi linkki.\n"
@@ -2339,7 +2491,8 @@ def _download_error(message, status_code):
 @app.route(route="download_judge_papers", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET", "HEAD"])
 def download_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Resolve an e-mailed download link (?t=<token>, the sentemails RowKey) to a
+    Resolve an e-mailed or copied download link (?t=<token>, the sentemails
+    RowKey written by send_judge_papers or create_download_link) to a
     short-lived read SAS and redirect there. The recipient isn't signed in, so
     this is the one route with no user header — the proxy secret still applies.
     """

@@ -96,6 +96,9 @@ ROUTES = {
     "send_judge_papers": ("write", lambda **kw: call(
         fa.send_judge_papers, make_request("POST", body=_send_body(
             to="judge@example.com", resultsServiceEmail="results@example.com"), **kw))),
+    "create_download_link": ("read", lambda **kw: call(
+        fa.create_download_link, make_request(
+            "POST", body={"id": COMP_ID, "fileName": SENT_FILE}, **kw))),
     "upload_file": ("write", lambda **kw: call(
         fa.upload_file, make_request("POST", params={"competition": COMP_ID, "filename": "Z_New.pdf"},
                                      raw_body=b"%PDF-new", **kw))),
