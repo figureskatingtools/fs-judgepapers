@@ -328,7 +328,8 @@ def test_an_unreachable_platform_never_deletes_early(tables, blobs, platform, sw
     with caplog.at_level(logging.ERROR):
         stats = sweep()
 
-    assert stats == {"deleted": 0, "skipped": 1, "failed": 0, "synced": 0}
+    assert stats == {"deleted": 0, "skipped": 1, "failed": 0, "synced": 0, "orphaned": 0,
+                     "orphan_kept": 0, "orphan_dry_run": 0, "orphan_skipped": 0}
     assert stored(tables, "bound001")["Visible"] is True
     assert any("bound001" in r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR)
 
@@ -359,15 +360,17 @@ def test_without_a_registry_configured_bound_rows_are_skipped(tables, blobs, cap
     assert len(errors) == 1
 
 
-def test_a_missing_clock_row_keeps_the_record(tables, blobs, platform, sweep, caplog):
-    # No date-based deletion without the platform: a missing row is kept.
+def test_a_missing_clock_row_keeps_a_record_under_60_days(tables, blobs, platform, sweep, caplog):
+    # No date-based deletion without the platform: a missing row is kept
+    # while the record is younger than 60 days (CreatedDate is 42 days back).
+    put_platform_competition(platform, platform_id="99999999-2222-4333-8444-555555555555")
     seed(tables, blobs, "bound001", platform_id=PLATFORM_ID, deletion=iso(NOW - timedelta(days=9)))
     seed(tables, blobs, "bound002", platform_id=PLATFORM_ID.upper(), deletion=None)
 
     with caplog.at_level(logging.WARNING):
         stats = sweep()
 
-    assert stats["deleted"] == 0 and stats["skipped"] == 2
+    assert stats["deleted"] == 0 and stats["orphaned"] == 0 and stats["orphan_kept"] == 2
     assert stored(tables, "bound001")["Visible"] is True
     assert any("bound001" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
 
@@ -395,7 +398,7 @@ def test_legacy_unbound_rows_go_on_their_stored_date_and_get_nothing_new(tables,
     assert stored(tables, "new00001")["Visible"] is True
     assert stored(tables, "new00001")["DeletionDate"] == iso(NOW + timedelta(days=59))
     assert not [c for c in tables["competitions"].updates() if c[1][1] == "new00001"]
-    assert platform.calls == []
+    assert not [c for c in platform.calls if c[0] == "get_entity"]
 
 
 def test_the_sweep_ignores_hidden_and_legacy_name_keyed_rows(tables, blobs, platform, sweep):
@@ -403,6 +406,212 @@ def test_the_sweep_ignores_hidden_and_legacy_name_keyed_rows(tables, blobs, plat
     tables["competitions"].put(PartitionKey="GLOBAL", RowKey="Legacy name", Name="Legacy name")
 
     assert sweep()["deleted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Orphans: no platform competition behind the record
+# ---------------------------------------------------------------------------
+
+OTHER_ID = "99999999-2222-4333-8444-555555555555"
+OLD = iso(NOW - timedelta(days=61))
+YOUNG = iso(NOW - timedelta(days=59))
+
+
+@pytest.fixture
+def purge(monkeypatch):
+    monkeypatch.setenv("ORPHAN_PURGE_ENABLED", "true")
+
+
+def seed_orphan(tables, blobs, comp_id, created, **kwargs):
+    row = seed(tables, blobs, comp_id, CreatedDate=created, UploadedFileCount=4,
+               GenerateRunCount=2, PagesGenerated=120, **kwargs)
+    tables["sentemails"].put(PartitionKey=comp_id, RowKey="t" * 32, SentBy=USER_EMAIL,
+                             SentByOid="11111111-2222-4333-8444-555555555555",
+                             To="judge@example.com", Cc="results@example.com")
+    return row
+
+
+def assert_scrubbed(tables, blobs, comp_id):
+    row = stored(tables, comp_id)
+    assert row["Visible"] is False
+    assert row["CreatedBy"] == "" and row["DeletedBy"] == "auto-cleanup"
+    assert "@" not in repr(row)
+    # Statistics stay.
+    assert row["UploadedFileCount"] == 4 and row["GenerateRunCount"] == 2
+    assert row["PagesGenerated"] == 120
+    assert not [k for k in tables["sentemails"].rows if k[0] == comp_id]
+    assert not any(name.startswith(f"Cup {comp_id}-") for name in blobs.blobs)
+
+
+def test_an_old_record_without_platform_id_is_deleted_and_scrubbed(tables, blobs, platform, sweep,
+                                                                   purge):
+    put_platform_competition(platform, platform_id=OTHER_ID)
+    # Its stored (legacy) date is still ahead: only the orphan rule applies.
+    seed_orphan(tables, blobs, "orphan01", OLD, deletion=iso(NOW + timedelta(days=30)))
+
+    stats = sweep()
+
+    assert stats["orphaned"] == 1 and stats["deleted"] == 0
+    assert_scrubbed(tables, blobs, "orphan01")
+
+
+def test_an_old_record_whose_clock_row_is_not_found_is_deleted_and_scrubbed(
+        tables, blobs, platform, sweep, purge):
+    put_platform_competition(platform, platform_id=OTHER_ID)  # the table is healthy
+    seed_orphan(tables, blobs, "orphan02", OLD, platform_id=PLATFORM_ID)
+
+    assert sweep()["orphaned"] == 1
+    assert_scrubbed(tables, blobs, "orphan02")
+
+
+def test_a_platform_id_that_is_not_a_guid_counts_as_orphaned(tables, blobs, platform, sweep, purge):
+    put_platform_competition(platform, platform_id=OTHER_ID)
+    seed_orphan(tables, blobs, "orphan03", OLD, platform_id="not-a-guid")
+
+    assert sweep()["orphaned"] == 1
+    assert_scrubbed(tables, blobs, "orphan03")
+
+
+def test_a_legacy_name_keyed_row_follows_the_orphan_rule(tables, blobs, platform, sweep, purge):
+    put_platform_competition(platform, platform_id=OTHER_ID)
+    comps = tables["competitions"]
+    comps.put(PartitionKey="GLOBAL", RowKey="Old Cup", Name="Old Cup", CreatedBy=USER_EMAIL,
+              CreatedDate=OLD, UploadedFileCount=3)
+    blobs.upload_blob("Old Cup/A_JudgesSheetAll.pdf", b"%PDF")
+    comps.put(PartitionKey="GLOBAL", RowKey="New Cup", Name="New Cup", CreatedBy=USER_EMAIL,
+              CreatedDate=YOUNG)
+
+    assert sweep()["orphaned"] == 1
+    assert comps.row("GLOBAL", "Old Cup")["CreatedBy"] == ""
+    assert comps.row("GLOBAL", "Old Cup")["UploadedFileCount"] == 3
+    assert not any(name.startswith("Old Cup/") for name in blobs.blobs)
+    assert comps.row("GLOBAL", "New Cup")["CreatedBy"] == USER_EMAIL
+
+
+@pytest.mark.parametrize("platform_id", [None, PLATFORM_ID])
+def test_an_orphan_younger_than_60_days_is_untouched(tables, blobs, platform, sweep, purge,
+                                                     platform_id):
+    put_platform_competition(platform, platform_id=OTHER_ID)
+    seed_orphan(tables, blobs, "young001", YOUNG, platform_id=platform_id,
+                deletion=iso(NOW + timedelta(days=30)))
+
+    stats = sweep()
+
+    assert stats["orphaned"] == 0 and stats["orphan_kept"] == 1
+    row = stored(tables, "young001")
+    assert row["Visible"] is True and row["CreatedBy"] == USER_EMAIL
+    assert tables["sentemails"].rows
+
+
+def test_without_a_created_date_the_newest_timestamp_counts(tables, blobs, platform, sweep, purge):
+    put_platform_competition(platform, platform_id=OTHER_ID)
+    seed_orphan(tables, blobs, "nodate01", "-", platform_id=PLATFORM_ID,
+                LastStatisticsDate=OLD, LastGeneratedDate=YOUNG)
+    seed_orphan(tables, blobs, "nodate02", "-", platform_id=PLATFORM_ID, LastGeneratedDate=OLD)
+    seed_orphan(tables, blobs, "nodate03", "-", platform_id=PLATFORM_ID)  # no timestamp at all
+
+    stats = sweep()
+
+    assert stats["orphaned"] == 1 and stats["orphan_kept"] == 2
+    assert stored(tables, "nodate01")["Visible"] is True
+    assert stored(tables, "nodate02")["Visible"] is False
+    assert stored(tables, "nodate03")["Visible"] is True
+
+
+def test_a_clock_read_error_is_never_not_found(tables, blobs, platform, sweep, purge):
+    put_platform_competition(platform, platform_id=OTHER_ID)
+    seed_orphan(tables, blobs, "bound001", OLD, platform_id=PLATFORM_ID)
+    platform.fail_get = HttpResponseError("throttled")
+
+    stats = sweep()
+
+    assert stats["orphaned"] == 0 and stats["skipped"] == 1
+    assert stored(tables, "bound001")["Visible"] is True
+    assert stored(tables, "bound001")["CreatedBy"] == USER_EMAIL
+
+
+def test_an_empty_clock_table_aborts_the_orphan_step(tables, blobs, platform, sweep, purge, caplog):
+    # Zero clock rows while bound records exist: the wrong table or account.
+    seed_orphan(tables, blobs, "bound001", OLD, platform_id=PLATFORM_ID)
+    seed_orphan(tables, blobs, "unbound1", OLD, deletion=iso(NOW + timedelta(days=30)))
+
+    with caplog.at_level(logging.ERROR):
+        stats = sweep()
+
+    assert stats["orphaned"] == 0 and stats["orphan_skipped"] == 2
+    assert stored(tables, "bound001")["Visible"] is True
+    assert stored(tables, "unbound1")["Visible"] is True
+    assert any("orphan step aborted" in r.getMessage() and "empty" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_an_empty_clock_table_is_fine_when_nothing_is_bound(tables, blobs, platform, sweep, purge):
+    seed_orphan(tables, blobs, "unbound1", OLD, deletion=iso(NOW + timedelta(days=30)))
+
+    assert sweep()["orphaned"] == 1
+
+
+@pytest.mark.parametrize("error", ["throttled", "TableNotFound"])
+def test_an_unreadable_clock_table_aborts_the_orphan_step(tables, blobs, platform, sweep, purge,
+                                                          error):
+    from azure.core.exceptions import ResourceNotFoundError
+    if error == "TableNotFound":
+        failure = ResourceNotFoundError("ErrorCode:TableNotFound")
+        failure.error_code = "TableNotFound"
+    else:
+        failure = HttpResponseError("throttled")
+    platform.fail_query = failure
+    seed_orphan(tables, blobs, "unbound1", OLD, deletion=iso(NOW + timedelta(days=30)))
+    seed_orphan(tables, blobs, "bound001", OLD, platform_id=PLATFORM_ID)
+
+    stats = sweep()
+
+    assert stats["orphaned"] == 0 and stats["orphan_skipped"] == 2
+    assert stored(tables, "unbound1")["Visible"] is True
+
+
+def test_without_a_registry_configured_the_orphan_step_is_aborted(tables, blobs, purge):
+    seed_orphan(tables, blobs, "unbound1", OLD, deletion=iso(NOW + timedelta(days=30)))
+
+    stats = fa.run_auto_deletion(tables["competitions"], NOW)
+
+    assert stats["orphaned"] == 0 and stats["orphan_skipped"] == 1
+
+
+def test_a_live_bound_record_is_untouched(tables, blobs, platform, sweep, purge):
+    seed_orphan(tables, blobs, "bound001", OLD, platform_id=PLATFORM_ID)
+    put_platform_competition(platform, deletion=iso(NOW + timedelta(days=5)))
+
+    stats = sweep()
+
+    assert stats["orphaned"] == 0 and stats["deleted"] == 0
+    row = stored(tables, "bound001")
+    assert row["Visible"] is True and row["CreatedBy"] == USER_EMAIL
+    assert tables["sentemails"].rows
+
+
+def test_the_kill_switch_only_logs(tables, blobs, platform, sweep, caplog, monkeypatch):
+    monkeypatch.setenv("ORPHAN_PURGE_ENABLED", "false")
+    put_platform_competition(platform, platform_id=OTHER_ID)
+    seed_orphan(tables, blobs, "orphan01", OLD, platform_id=PLATFORM_ID)
+
+    with caplog.at_level(logging.WARNING):
+        stats = sweep()
+
+    assert stats["orphaned"] == 0 and stats["orphan_dry_run"] == 1
+    assert stored(tables, "orphan01")["Visible"] is True
+    assert any("would delete" in r.getMessage() for r in caplog.records)
+
+
+def test_the_timer_logs_the_orphan_counts(tables, blobs, platform, purge, caplog):
+    put_platform_competition(platform, platform_id=OTHER_ID)
+    seed_orphan(tables, blobs, "orphan01", OLD, platform_id=PLATFORM_ID)
+
+    with caplog.at_level(logging.INFO):
+        fa.auto_delete_expired_competitions._function.get_user_function()(None)
+
+    assert stored(tables, "orphan01")["Visible"] is False
+    assert any("Orphans: deleted 1" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

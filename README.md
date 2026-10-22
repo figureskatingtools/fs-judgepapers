@@ -33,6 +33,7 @@ Sign-in is Microsoft Entra ID enforced by App Service Easy Auth on [figureskatin
 - **Category Management** — Categories loaded from Azure Table Storage (ISU/MUPI judging methods); synchronized-skating categories can be switched between ISU and MUPI per competition
 - **Competition Workflow** — List, create, upload PDFs, generate and download judging packets
 - **Serverless & Secure** — Azure Functions with Managed Identity for storage access
+- **Retention** — a competition's files and e-mail addresses are deleted when the competition is deleted on figureskatingtools.com (anonymous usage statistics stay). A record no competition stands behind any more (or one from before the shared competitions) is deleted the same way once it is more than 60 days old. Logs are kept 90 days.
 
 ## Judging Method: ISU vs MUPI
 
@@ -89,7 +90,7 @@ read -rs MAILGUN_API_KEY && export MAILGUN_API_KEY   # optional, kept out of arg
 ./deploy_infra.sh [--proxy-secret <SECRET>] [--example-video-url <URL>]
 ```
 
-Deploys Azure resources (Resource Group, Storage Account, Function App, Application Insights, RBAC) using Bicep. No Web App, DNS or custom domain is created here — hosting and the domain belong to the figureskatingtools-site repo.
+Deploys Azure resources (Resource Group, Storage Account, Function App, Application Insights with a 90-day Log Analytics workspace, RBAC) using Bicep. No Web App, DNS or custom domain is created here — hosting and the domain belong to the figureskatingtools-site repo.
 
 ### 2. Backend
 

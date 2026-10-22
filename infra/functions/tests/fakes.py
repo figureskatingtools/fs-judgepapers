@@ -68,6 +68,8 @@ class FakeTableClient:
         # Set to an exception instance to make every get_entity call raise it.
         self.fail_get: Exception | None = None
         self.fail_next_update: Exception | None = None
+        # Set to an exception instance to make every query_entities call raise it.
+        self.fail_query: Exception | None = None
 
     def create_table(self):
         self.calls.append(("create_table",))
@@ -118,6 +120,8 @@ class FakeTableClient:
 
     def query_entities(self, query_filter, select=None, **kwargs):
         self.calls.append(("query_entities", query_filter))
+        if self.fail_query is not None:
+            raise self.fail_query
         clauses = _parse_filter(query_filter)
         return [FakeEntity(row) for _key, row in sorted(self.rows.items())
                 if _matches(row, clauses)]
