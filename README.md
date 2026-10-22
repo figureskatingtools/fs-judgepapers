@@ -151,6 +151,14 @@ Deployed from the figureskatingtools-site repo, not from here.
 └── deploy_backend.sh      # Backend deployment script
 ```
 
-## License
+## Licence
 
-See [LICENSE](LICENSE) for details.
+The source code is licensed under the GNU Affero General Public License, version 3 only (SPDX:
+`AGPL-3.0-only`); see [LICENSE](LICENSE).
+
+The figureskatingtools name, logo and document templates (including
+`infra/functions/assets/logo.png`) are not covered by this licence and remain the property of
+their owner; all rights reserved.
+
+The bundled fonts in `infra/functions/assets/fonts/` keep their own licence, the SIL Open Font
+License 1.1 (`OFL.txt`, `LiberationSans-OFL.txt`).
