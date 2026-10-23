@@ -87,8 +87,10 @@ Keys are category abbreviations, values `ISU` or `MUPI`; only deviations from th
 
 ```bash
 read -rs MAILGUN_API_KEY && export MAILGUN_API_KEY   # optional, kept out of argv
-./deploy_infra.sh [--proxy-secret <SECRET>] [--example-video-url <URL>]
+./deploy_infra.sh -g <resource-group> [--proxy-secret <SECRET>] [--example-video-url <URL>] [--orphan-purge true|false]
 ```
+
+Without `--orphan-purge`, the script keeps the Function App's current `ORPHAN_PURGE_ENABLED` (the nightly orphan deletion); if it can't read it (no app yet, no permission) it deploys `false` (dry run) and says so, so a manual run never re-enables a purge the workflow deployed off.
 
 Deploys Azure resources (Resource Group, Storage Account, Function App, Application Insights with a 90-day Log Analytics workspace, RBAC) using Bicep. No Web App, DNS or custom domain is created here — hosting and the domain belong to the figureskatingtools-site repo.
 

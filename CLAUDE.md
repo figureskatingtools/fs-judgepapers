@@ -29,7 +29,8 @@ curl -s http://localhost:7071/api/check_user_permission \
   -H 'x-forwarded-user-email: you@example.com'
 
 # Deployment (manual; CI does this automatically on push to main / dispatch)
-./deploy_infra.sh [--proxy-secret <SECRET>]   # Bicep, subscription-scoped
+./deploy_infra.sh -g <resource-group> [--proxy-secret <SECRET>] [--orphan-purge true|false]   # Bicep, subscription-scoped
+# --orphan-purge omitted = keep the deployed ORPHAN_PURGE_ENABLED (false if unreadable), never the Bicep default true
 ./deploy_backend.sh -g <resource-group>       # Functions ZIP deploy
 ```
 
