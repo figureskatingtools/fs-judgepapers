@@ -84,6 +84,7 @@ jobs:
               mailgunApiKey="${{ secrets.MAILGUN_API_KEY }}" \
               exampleVideoUrl="${{ vars.EXAMPLE_VIDEO_URL }}" \
               publicBaseUrl="${{ needs.set-environment.outputs.env_name == 'prod' && 'https://figureskatingtools.com' || 'https://test.figureskatingtools.com' }}" \
+              orphanPurgeEnabled="${{ vars.ORPHAN_PURGE_ENABLED != 'false' }}" \
             --query 'properties.outputs' \
             -o json)
 

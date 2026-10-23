@@ -30,6 +30,11 @@ param exampleVideoUrl string = ''
 // proxies /judgepapers/download to download_judge_papers).
 param publicBaseUrl string = 'https://figureskatingtools.com'
 
+// Nightly orphan step: true = delete orphaned records older than 60 days,
+// false = dry run (logs only) — the kill switch (GitHub variable
+// ORPHAN_PURGE_ENABLED=false). See modules/function.bicep.
+param orphanPurgeEnabled bool = true
+
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
   name: resourceGroupName
   location: location
@@ -53,6 +58,8 @@ module function 'modules/function.bicep' = {
     functionAppName: 'func-fs-judgepapers-${uniqueString(rg.id)}'
     appServicePlanName: 'asp-fs-judgepapers'
     appInsightsName: 'ai-fs-judgepapers'
+    // rg-fs-judgepapers-<env> -> log-fs-judgepapers-<env>
+    logAnalyticsWorkspaceName: 'log-fs-judgepapers-${last(split(resourceGroupName, '-'))}'
     storageAccountName: storage.outputs.storageAccountName
     deploymentContainerUrl: 'https://${storage.outputs.storageAccountName}.blob.${environment().suffixes.storage}/app-package'
     proxySharedSecret: proxySharedSecret
@@ -61,6 +68,7 @@ module function 'modules/function.bicep' = {
     mailgunApiKey: mailgunApiKey
     exampleVideoUrl: exampleVideoUrl
     publicBaseUrl: publicBaseUrl
+    orphanPurgeEnabled: orphanPurgeEnabled
   }
 }
 
@@ -76,6 +84,7 @@ module roleAssignment 'modules/roleassignment.bicep' = {
 output resourceGroupName string = rg.name
 output storageAccountName string = storage.outputs.storageAccountName
 output functionAppName string = function.outputs.functionAppName
+output orphanPurgeEnabled bool = orphanPurgeEnabled
 
 // Consumed by the site repo (TOOL_PRINCIPAL_ID_JUDGEPAPERS) so the shared
 // competition-data container can grant this Function App read access.
