@@ -5,5 +5,5 @@ azure-data-tables~=12.7.0
 pypdf~=6.20.0
 reportlab~=5.0.1
 pdfminer.six==20260107
-pillow~=12.3
+pillow~=13.0
 tzdata~=2026.5
