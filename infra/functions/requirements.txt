@@ -2,7 +2,7 @@ azure-functions~=2.3.0
 azure-storage-blob~=12.31.0
 azure-identity~=1.26.0
 azure-data-tables~=12.7.0
-pypdf~=6.20.0
+pypdf~=6.21.2
 reportlab~=5.0.1
 pdfminer.six==20260107
 pillow~=12.3
