@@ -33,6 +33,7 @@ Sign-in is Microsoft Entra ID enforced by App Service Easy Auth on [figureskatin
 - **Category Management** — Categories loaded from Azure Table Storage (ISU/MUPI judging methods); synchronized-skating categories can be switched between ISU and MUPI per competition
 - **Competition Workflow** — List, create, upload PDFs, generate and download judging packets
 - **Serverless & Secure** — Azure Functions with Managed Identity for storage access
+- **Retention** — a competition's files and e-mail addresses are deleted when the competition is deleted on figureskatingtools.com (anonymous usage statistics stay). A record no competition stands behind any more (or one from before the shared competitions) is deleted the same way once it is more than 60 days old. Logs are kept 90 days.
 
 ## Judging Method: ISU vs MUPI
 
@@ -86,10 +87,12 @@ Keys are category abbreviations, values `ISU` or `MUPI`; only deviations from th
 
 ```bash
 read -rs MAILGUN_API_KEY && export MAILGUN_API_KEY   # optional, kept out of argv
-./deploy_infra.sh [--proxy-secret <SECRET>] [--example-video-url <URL>]
+./deploy_infra.sh -g <resource-group> [--proxy-secret <SECRET>] [--example-video-url <URL>] [--orphan-purge true|false]
 ```
 
-Deploys Azure resources (Resource Group, Storage Account, Function App, Application Insights, RBAC) using Bicep. No Web App, DNS or custom domain is created here — hosting and the domain belong to the figureskatingtools-site repo.
+Without `--orphan-purge`, the script keeps the Function App's current `ORPHAN_PURGE_ENABLED` (the nightly orphan deletion); if it can't read it (no app yet, no permission) it deploys `false` (dry run) and says so, so a manual run never re-enables a purge the workflow deployed off.
+
+Deploys Azure resources (Resource Group, Storage Account, Function App, Application Insights with a 90-day Log Analytics workspace, RBAC) using Bicep. No Web App, DNS or custom domain is created here — hosting and the domain belong to the figureskatingtools-site repo.
 
 ### 2. Backend
 
@@ -151,6 +154,14 @@ Deployed from the figureskatingtools-site repo, not from here.
 └── deploy_backend.sh      # Backend deployment script
 ```
 
-## License
+## Licence
 
-See [LICENSE](LICENSE) for details.
+The source code is licensed under the GNU Affero General Public License, version 3 only (SPDX:
+`AGPL-3.0-only`); see [LICENSE](LICENSE).
+
+The figureskatingtools name, logo and document templates (including
+`infra/functions/assets/logo.png`) are not covered by this licence and remain the property of
+their owner; all rights reserved.
+
+The bundled fonts in `infra/functions/assets/fonts/` keep their own licence, the SIL Open Font
+License 1.1 (`OFL.txt`, `LiberationSans-OFL.txt`).
