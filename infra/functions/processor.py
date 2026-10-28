@@ -131,6 +131,46 @@ def segment_intro_page(options, prefix):
     return 'cover' if use_cover else 'schedule'
 
 
+def calculation_setup_every_segment(options):
+    """
+    Whether a referee gets the category's CalculationSetupVerificationforReferee
+    in every segment they referee (globalCalculationSetupEverySegment; the
+    site's "Referee's calculation setup in every segment" checkbox). Off by
+    default: the setup covers all segments of the category, so each referee
+    gets it once per category, in their first segment of it (across days).
+    Only a JSON true turns it on.
+    """
+    return options.get('globalCalculationSetupEverySegment') is True
+
+
+def calculation_setup_prefix(prefix, categories=None):
+    """
+    The prefix of the category's CalculationSetupVerificationforReferee file:
+    the segment prefix with everything after the category abbreviation (and a
+    split group's two digits, e.g. group 01) replaced by dashes. One setup file
+    covers every segment of the category (or split group).
+    """
+    abbrev_len = get_abbreviation_length(prefix, categories)
+
+    calc_cut_pos = None
+    if abbrev_len is not None:
+        # Check if there's a split number after abbreviation + dashes
+        remainder = prefix[abbrev_len:]
+        stripped = remainder.lstrip("-")
+        if stripped and len(stripped) >= 2 and stripped[:2].isdigit():
+            # Preserve up to the split digits
+            dash_count = len(remainder) - len(stripped)
+            calc_cut_pos = abbrev_len + dash_count + 2
+        else:
+            calc_cut_pos = abbrev_len
+    elif len(prefix) >= 18:
+        calc_cut_pos = 18  # Fallback
+
+    if calc_cut_pos is not None and calc_cut_pos < len(prefix):
+        return prefix[:calc_cut_pos] + '-' * (len(prefix) - calc_cut_pos)
+    return prefix  # Fallback
+
+
 COMBINED_SCHEDULE_MAX_COPIES = 50
 
 
@@ -463,7 +503,12 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 withdrawn_pages_removed += removed
         return dst
 
-    for date_str, persons in person_tasks.items():
+    setup_every_segment = calculation_setup_every_segment(options)
+    setup_given = set()  # (calculation setup prefix, referee slug) already in a packet
+    setup_skipped = 0
+
+    # Days in date order (YYYYMMDD), so "first segment" spans days too
+    for date_str, persons in sorted(person_tasks.items()):
         for slug, data in persons.items():
             tasks = data['tasks']
             # Sort tasks by start time from CompetitionSchedule (earliest first).
@@ -564,33 +609,16 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 
                 # Role specific files
                 if role == "referee":
-                    # Handle generic prefix for CalculationSetup
-                    # Use the abbreviation length from the categories table to determine
-                    # where the "category-specific" part of the prefix ends.
-                    # For split groups (e.g. group 01), we need to preserve past the split digits.
-                    abbrev_len = get_abbreviation_length(prefix, categories)
-                    
-                    calc_cut_pos = None
-                    if abbrev_len is not None:
-                        # Check if there's a split number after abbreviation + dashes
-                        remainder = prefix[abbrev_len:]
-                        stripped = remainder.lstrip("-")
-                        if stripped and len(stripped) >= 2 and stripped[:2].isdigit():
-                            # Preserve up to the split digits
-                            dash_count = len(remainder) - len(stripped)
-                            calc_cut_pos = abbrev_len + dash_count + 2
-                        else:
-                            calc_cut_pos = abbrev_len
-                    elif len(prefix) >= 18:
-                        calc_cut_pos = 18  # Fallback
-
-                    if calc_cut_pos is not None and calc_cut_pos < len(prefix):
-                        calc_prefix = prefix[:calc_cut_pos] + '-' * (len(prefix) - calc_cut_pos)
+                    # The category's calculation setup: in every segment when
+                    # asked for, otherwise only in this referee's first segment
+                    # of the category (a different referee gets their own copy)
+                    calc_prefix = calculation_setup_prefix(prefix, categories)
+                    if setup_every_segment or (calc_prefix, slug) not in setup_given:
+                        setup_given.add((calc_prefix, slug))
+                        file_list.append(os.path.join(segment_dir, f"{calc_prefix}_CalculationSetupVerificationforReferee.pdf"))
                     else:
-                        calc_prefix = prefix  # Fallback
-                        
-                    file_list.append(os.path.join(segment_dir, f"{calc_prefix}_CalculationSetupVerificationforReferee.pdf"))
-                    
+                        setup_skipped += 1
+
                     file_list.append(f"{base_path}_RefereeSheet.pdf")
                     file_list.append(f"{base_path}_JudgesSheetAll_referee_{slug}.pdf")
                     
@@ -616,6 +644,9 @@ def process_judging_papers(source_dir, output_dir, options=None):
             print(f"  Creating a personal packet for {date_str}...")
             total_pages += merge_pdfs(output_path, file_list) or 0
             count += 1
+
+    if setup_skipped:
+        print(f"  Left out {setup_skipped} repeated referee calculation setup(s)")
 
     # ---------------------------------------------------------
     # 4. Combine Daily Papers
