@@ -161,6 +161,10 @@ class FakeDownloader:
     def readall(self):
         return self._data
 
+    def readinto(self, stream):
+        stream.write(self._data)
+        return len(self._data)
+
 
 class FakeBlobClient:
     def __init__(self, container, blob_name):

@@ -29,7 +29,7 @@ Sign-in is Microsoft Entra ID enforced by App Service Easy Auth on [figureskatin
 ## Features
 
 - **PDF Processing Pipeline** — Split → Categorize → Cover pages → Merge → ZIP
-- **Multi-language UI** — Finnish (default) and English
+- **Category names as printed** — categories are named as FSM prints them on the uploaded `JudgesSheetAll`, in the competition's own language
 - **Category Management** — Categories loaded from Azure Table Storage (ISU/MUPI judging methods); synchronized-skating categories can be switched between ISU and MUPI per competition
 - **Competition Workflow** — List, create, upload PDFs, generate and download judging packets
 - **Serverless & Secure** — Azure Functions with Managed Identity for storage access
@@ -58,7 +58,7 @@ The control appears only for categories whose table row has the competition type
 
 ### Where the choice lives
 
-The override is stored in the competition's `metadata.json` next to the language setting:
+The override is stored in the competition's `metadata.json`:
 
 ```json
 { "judgingMethodOverrides": { "FSKXSYNCHRONMLAIKU": "ISU" } }

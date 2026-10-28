@@ -256,7 +256,7 @@ def time_sort_key(time_str):
 # Segment names FSM prints after the category on line 2 of its sheets; used
 # when the processor has no segment name for the prefix.
 _SEGMENT_SUFFIX_RE = re.compile(
-    r"\s(SHORT PROGRAM|FREE SKATING|FREE PROGRAM|RHYTHM DANCE|FREE DANCE|PATTERN DANCE.*|PD\d.*)$",
+    r"\s(SHORT PROGRAM|FREE SKATING|FREE PROGRAM|RHYTHM DANCE|FREE DANCE|PATTERN DANCE.*|PD[A-Z]?\d.*)$",
     re.IGNORECASE)
 
 
