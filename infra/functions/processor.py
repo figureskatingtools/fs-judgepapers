@@ -768,18 +768,22 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
     officials_by_role = {bucket: len(slugs) for bucket, slugs in sorted(role_slugs.items())}
 
     # Categories / segment types / competition type / judging method per prefix
-    category_names = set()
+    # One name per category (abbreviation): as printed on a JudgesSheetAll
+    # (split groups counted once) when any of its segments has one, else the
+    # table's Finnish name
+    printed_names = {}
+    table_names = {}
     competition_types = set()
     judging_methods = set()
     segment_types = set()
-    for prefix in prefixes:
+    for prefix in sorted(prefixes):
         matched = match_category(prefix, categories)
         if matched:
-            # As printed on the JudgesSheetAll (split groups counted once),
-            # else the table's Finnish name
+            code = matched["abbreviation"]
             printed = prefix_category_names.get(prefix)
-            category_names.add(re.sub(r"\s*#\s*\d+$", "", printed) if printed
-                               else matched.get("displayNameFi", matched["displayName"]))
+            if printed:
+                printed_names.setdefault(code, re.sub(r"\s*#\s*\d+$", "", printed))
+            table_names[code] = matched.get("displayNameFi", matched["displayName"])
             competition_types.add(matched["competitionType"])
             judging_methods.add(effective_judging_method(
                 matched["abbreviation"], matched["competitionType"],
@@ -787,6 +791,8 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
         _, segment = parse_prefix(prefix, categories)
         if segment and segment != "Category General":
             segment_types.add(segment)
+
+    category_names = {code: printed_names.get(code, name) for code, name in table_names.items()}
 
     def _single_or_mixed(values):
         values = {v for v in values if v}
@@ -818,7 +824,7 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
 
     return {
         "competition_type": _single_or_mixed(competition_types),
-        "categories": sorted(category_names),
+        "categories": sorted(category_names.values()),
         "category_count": len(category_names),
         "competitor_count": competitor_count,
         "segment_count": len(prefixes),

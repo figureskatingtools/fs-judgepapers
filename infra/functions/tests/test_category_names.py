@@ -154,3 +154,29 @@ def test_file_list_uses_the_printed_category_name(details):
     assert not any("categoryFi" in f for f in data["files"])
     # The stored language setting is gone from the response
     assert "language" not in data
+
+
+# --- usage statistics ----------------------------------------------------------
+
+def category_stats(prefix_category_names):
+    tasks = [(prefix, "judge") for prefix in prefix_category_names]
+    stats = processor._compute_statistics(
+        CATEGORIES, [], {"20261107": {"jon_judge": {"tasks": tasks}}}, {},
+        prefix_category_names, total_pages=0)
+    return stats["categories"], stats["category_count"]
+
+
+def test_a_category_is_counted_once_with_its_printed_name():
+    # The FNL's line couldn't be read: its table name doesn't count separately
+    assert category_stats({
+        PREFIX: "JUNIORINAISET",
+        "FSKWSINGLES-KJUNIW----FNL0000100--": None,
+    }) == (["JUNIORINAISET"], 1)
+
+
+def test_split_groups_count_as_one_category():
+    assert category_stats({
+        "FSKWSINGLES-KJUNIW----QUAL000110--": "JUNIORINAISET #1",
+        "FSKWSINGLES-KJUNIW----QUAL000120--": "JUNIORINAISET #2",
+        "FSKWSINGLES-ASILMW----FNL0000100--": None,
+    }) == (["A-Silmut, Tytöt", "JUNIORINAISET"], 2)
