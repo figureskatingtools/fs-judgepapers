@@ -238,7 +238,8 @@ def _name_end(line, name):
     Index in `line` just past `name` when the line starts with it, compared
     case-insensitively and ignoring spaces and punctuation ('A-SILMUT TYTÖT'
     matches 'A-Silmut, Tytöt'); None otherwise. The name must end on a word
-    boundary.
+    boundary. Punctuation printed right after its last letter belongs to it
+    ('JUNIOR WOMEN (ISU)', 'JR.'), a split group's '#' excepted.
     """
     target = [c for c in name.casefold() if c.isalnum()]
     if not target:
@@ -246,7 +247,11 @@ def _name_end(line, name):
     ti = 0
     for i, ch in enumerate(line):
         if ti == len(target):
-            return None if ch.isalnum() else i
+            if ch.isalnum():
+                return None
+            while i < len(line) and not (line[i].isalnum() or line[i].isspace() or line[i] == "#"):
+                i += 1
+            return i
         c = ch.casefold()
         if not c.isalnum():
             continue

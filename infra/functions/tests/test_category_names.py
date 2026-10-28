@@ -20,6 +20,12 @@ JUN = {"abbreviation": "FSKWSINGLES-KJUNIW", "displayName": "Junior Women",
 ASILM = {"abbreviation": "FSKWSINGLES-ASILMW", "displayName": "A-Silmut, Girls",
          "displayNameFi": "A-Silmut, Tytöt", "competitionType": "Figure skating",
          "judgingMethod": "ISU"}
+JUN_ISU = {"abbreviation": "FSKWSINGLES-JUNISU", "displayName": "Junior Women (ISU)",
+           "displayNameFi": "Juniorinaiset (ISU)", "competitionType": "Figure skating",
+           "judgingMethod": "ISU"}
+NOV_JR = {"abbreviation": "FSKWSINGLES-NOVJR", "displayName": "Novice Girls Jr.",
+          "displayNameFi": "Noviisitytöt Jr.", "competitionType": "Figure skating",
+          "judgingMethod": "ISU"}
 CATEGORIES = [JUN, ASILM]
 
 
@@ -38,6 +44,12 @@ CATEGORIES = [JUN, ASILM]
     ("JUNIORDAMER SHORT PROGRAM", JUN, None, ("JUNIORDAMER", "SHORT PROGRAM")),
     # ... or at a wide gap, with no table row at all
     ("JUNIORDAMER   KORTPROGRAM", None, None, ("JUNIORDAMER", "KORTPROGRAM")),
+    # Closing punctuation stays with the category, before a '#N' too
+    ("JUNIOR WOMEN (ISU) #2 SHORT PROGRAM", JUN_ISU, 2, ("JUNIOR WOMEN (ISU) #2", "SHORT PROGRAM")),
+    ("JUNIORINAISET (ISU) SHORT PROGRAM", JUN_ISU, None, ("JUNIORINAISET (ISU)", "SHORT PROGRAM")),
+    ("JUNIORINAISET (ISU) SHORT PROGRAM", JUN_ISU, 1, ("JUNIORINAISET (ISU) #1", "SHORT PROGRAM")),
+    ("NOVIISITYTÖT JR. VAPAAOHJELMA", NOV_JR, None, ("NOVIISITYTÖT JR.", "VAPAAOHJELMA")),
+    ("A-SILMUT, TYTÖT, VAPAAOHJELMA", ASILM, None, ("A-SILMUT, TYTÖT", "VAPAAOHJELMA")),
     # The table name must end on a word boundary
     ("JUNIOR WOMENS  FREE SKATING", JUN, None, ("JUNIOR WOMENS", "FREE SKATING")),
     # Nothing to split on: no category, the whole line is the segment
