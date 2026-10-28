@@ -168,6 +168,31 @@ def calculation_setup_prefix(prefix, categories=None):
     return prefix  # Fallback
 
 
+# A Pattern Dance segment by the name FSM prints on the JudgesSheetAll:
+# 'PDK1 (Starlight Waltz)', 'PD1 ...', 'PATTERN DANCE ...'
+_PATTERN_DANCE_RE = re.compile(r"\b(PATTERN\s+DANCE|PD[A-Z]?\d)", re.IGNORECASE)
+
+# Roles whose papers a Pattern Dance segment leaves out by default
+PATTERN_DANCE_SKIPPED_ROLES = ("data_operator", "replay_operator", "technical_specialist_1")
+
+
+def is_pattern_dance(segment_name):
+    """Whether a segment name (from JudgesSheetAll line 2) is a Pattern Dance."""
+    return bool(segment_name) and _PATTERN_DANCE_RE.search(segment_name) is not None
+
+
+def pattern_dance_all_papers(options):
+    """
+    Whether Pattern Dance segments keep the Data / Replay Operators' planned
+    program content and the Technical Specialist 1 sheet
+    (globalPatternDanceAllPapers; the site's checkbox under "Papers to
+    print", off by default: those officials don't need them for a PD). Only a
+    JSON true turns it on. The time schedule / cover before the segment stays
+    either way.
+    """
+    return options.get('globalPatternDanceAllPapers') is True
+
+
 COMBINED_SCHEDULE_MAX_COPIES = 50
 
 
@@ -481,6 +506,8 @@ def process_judging_papers(source_dir, output_dir, options=None):
     setup_every_segment = calculation_setup_every_segment(options)
     setup_given = set()  # (calculation setup prefix, referee slug) already in a packet
     setup_skipped = 0
+    pattern_dance_all = pattern_dance_all_papers(options)
+    pattern_dance_skipped = 0
 
     # Days in date order (YYYYMMDD), so "first segment" spans days too
     for date_str, persons in sorted(person_tasks.items()):
@@ -583,7 +610,11 @@ def process_judging_papers(source_dir, output_dir, options=None):
                         file_list.append(start_list_path)
                 
                 # Role specific files
-                if role == "referee":
+                if (role in PATTERN_DANCE_SKIPPED_ROLES and not pattern_dance_all
+                        and is_pattern_dance(prefix_segment_names.get(prefix))):
+                    # Not needed for a Pattern Dance; the intro page above stays
+                    pattern_dance_skipped += 1
+                elif role == "referee":
                     # The category's calculation setup: in every segment when
                     # asked for, otherwise only in this referee's first segment
                     # of the category (a different referee gets their own copy)
@@ -622,6 +653,8 @@ def process_judging_papers(source_dir, output_dir, options=None):
 
     if setup_skipped:
         print(f"  Left out {setup_skipped} repeated referee calculation setup(s)")
+    if pattern_dance_skipped:
+        print(f"  Left out {pattern_dance_skipped} DO/RO/TS1 paper(s) of Pattern Dance segments")
 
     # ---------------------------------------------------------
     # 4. Combine Daily Papers
