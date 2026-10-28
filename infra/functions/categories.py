@@ -8,12 +8,23 @@ The 'categories' Azure Table holds one row per competition category with:
   - DisplayNameFi: Human-readable Finnish name (e.g. "A-Silmut, Tytöt")
   - JudgingMethod: "ISU" or "MUPI"
 
+The display names are not what the papers or the site show: a category is
+named as FSM prints it on line 2 of the uploaded JudgesSheetAll, in the
+competition's own language (names_from_sheet_line). The table names only help
+to find where the category ends on that line, and stand in when it can't be read.
+
 The table value is the *default*; synchronized-skating categories can be
 overridden per competition (see effective_judging_method).
 """
 
 import logging
+import re
 import time
+
+try:
+    from .combined_schedule import split_title
+except ImportError:
+    from combined_schedule import split_title
 
 # Module-level cache
 _categories_cache = None
@@ -218,4 +229,73 @@ def parse_filename_generic(filename, categories):
         "raw_segment": raw_segment,
         "suffix": suffix,
         "prefix": basename,
+        "splitNumber": split_number,
     }
+
+
+def _name_end(line, name):
+    """
+    Index in `line` just past `name` when the line starts with it, compared
+    case-insensitively and ignoring spaces and punctuation ('A-SILMUT TYTÖT'
+    matches 'A-Silmut, Tytöt'); None otherwise. The name must end on a word
+    boundary.
+    """
+    target = [c for c in name.casefold() if c.isalnum()]
+    if not target:
+        return None
+    ti = 0
+    for i, ch in enumerate(line):
+        if ti == len(target):
+            return None if ch.isalnum() else i
+        c = ch.casefold()
+        if not c.isalnum():
+            continue
+        if c != target[ti]:
+            return None
+        ti += 1
+    return len(line) if ti == len(target) else None
+
+
+_SPLIT_MARK_RE = re.compile(r"\s*#\s*\d+")
+
+
+def names_from_sheet_line(line, category=None, split_number=None):
+    """
+    (category, segment) as FSM prints them on line 2 of a JudgesSheetAll, e.g.
+    'JUNIORI NAISET  SHORT PROGRAM' -> ('JUNIORI NAISET', 'SHORT PROGRAM'),
+    whatever language the competition uses. `category` is the matched table
+    row: its names (any language) only locate the end of the category on the
+    line; otherwise the line is split before a known segment name or at a gap
+    of 2+ spaces (combined_schedule.split_title). A split group's '#N' is kept,
+    or added from split_number when the line has none.
+
+    Returns (None, line) when the line can't be split.
+    """
+    line = (line or "").strip()
+    if not line:
+        return None, None
+
+    end = None
+    if category:
+        names = {category.get("displayName"), category.get("displayNameFi")}
+        for name in sorted(filter(None, names), key=len, reverse=True):
+            end = _name_end(line, name)
+            if end is not None:
+                break
+    if end is not None:
+        mark = _SPLIT_MARK_RE.match(line, end)
+        if mark:
+            end = mark.end()
+        cat_name, segment = line[:end], line[end:]
+    else:
+        cat_name, segment = split_title(line)
+        if segment is None:
+            return None, line
+
+    cat_name = cat_name.strip(" ,-/")
+    segment = (segment or "").strip(" ,-/") or None
+    if not cat_name:
+        return None, line
+    if split_number is not None and "#" not in cat_name:
+        cat_name = f"{cat_name} #{split_number}"
+    return cat_name, segment

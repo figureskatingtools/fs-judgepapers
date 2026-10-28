@@ -9,7 +9,7 @@ try:
     from .split_judges_sheets import split_pdf, filter_withdrawn_pages
     from .create_cover_pages import create_cover_pdf, create_segment_cover_pdf, create_start_list_with_strikethrough, extract_title_from_pdf, extract_segment_name_from_pdf
     from .combine_judging_papers import get_date_from_start_list, get_first_start_time_from_start_list, get_panel_info, merge_pdfs, slugify
-    from .categories import load_categories, match_category, parse_filename_generic, effective_judging_method
+    from .categories import load_categories, match_category, parse_filename_generic, effective_judging_method, names_from_sheet_line
     from .competition_schedule import parse_competition_schedule, get_schedule_start_time
     from .combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
 except ImportError:
@@ -17,7 +17,7 @@ except ImportError:
     from split_judges_sheets import split_pdf, filter_withdrawn_pages
     from create_cover_pages import create_cover_pdf, create_segment_cover_pdf, create_start_list_with_strikethrough, extract_title_from_pdf, extract_segment_name_from_pdf
     from combine_judging_papers import get_date_from_start_list, get_first_start_time_from_start_list, get_panel_info, merge_pdfs, slugify
-    from categories import load_categories, match_category, parse_filename_generic, effective_judging_method
+    from categories import load_categories, match_category, parse_filename_generic, effective_judging_method, names_from_sheet_line
     from competition_schedule import parse_competition_schedule, get_schedule_start_time
     from combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
 
@@ -46,14 +46,14 @@ def _get_categories_for_processor():
     return []
 
 
-def parse_prefix(prefix, categories=None, language="fi"):
+def parse_prefix(prefix, categories=None):
     """
     Parses a filename prefix (without suffix) to extract category display name
     and segment name using the categories table.
     Returns (category_name, segment_name) or (None, None) if not matched.
-    
-    Args:
-        language: 'fi' for Finnish names (default), 'en' for English names.
+
+    The category name is the table's Finnish one: only a fallback for when the
+    name FSM printed on the JudgesSheetAll (names_from_sheet_line) is missing.
     """
     if categories is None:
         categories = _get_categories_for_processor()
@@ -71,10 +71,7 @@ def parse_prefix(prefix, categories=None, language="fi"):
     # Detect split/group number
     stripped = remainder.lstrip("-")
     split_number = None
-    if language == "en":
-        display_name = matched["displayName"]
-    else:
-        display_name = matched.get("displayNameFi", matched["displayName"])
+    display_name = matched.get("displayNameFi", matched["displayName"])
     if stripped and len(stripped) >= 2 and stripped[:2].isdigit():
         split_number = int(stripped[:2])
         display_name = f"{display_name} #{split_number}"
@@ -254,9 +251,6 @@ def process_judging_papers(source_dir, output_dir, options=None):
     if options is None:
         options = {}
     
-    # Language setting: 'fi' (Finnish, default) or 'en' (English)
-    language = options.get('language', 'fi')
-
     # Per-competition ISU/MUPI choices for synchronized-skating categories.
     # Statistics only — the PDF pipeline never branches on the judging method.
     judging_overrides = options.get('judgingMethodOverrides') or {}
@@ -279,7 +273,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
     schedule_entries = []
     prefix_start_times = {}   # prefix -> "HH:MM" start time
     prefix_segment_names = {} # prefix -> actual segment name from JudgesSheetAll
-    prefix_category_names = {} # prefix -> category display name
+    prefix_category_names = {} # prefix -> category name as printed on its JudgesSheetAll
     prefix_withdrawn = {}     # prefix -> list of withdrawn competitor names
 
     for root, dirs, files in os.walk(source_dir):
@@ -303,35 +297,16 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 prefix = file.replace("_JudgesSheetAll.pdf", "")
                 js_path = os.path.join(root, file)
 
-                # Extract the full second line (segment name line)
+                # The second line: category and segment name as FSM prints them
                 full_seg_line = extract_segment_name_from_pdf(js_path)
                 if full_seg_line:
-                    # Strip category display name from the beginning to get just the segment name
-                    cat_name, _ = parse_prefix(prefix, categories, language=language)
-                    seg_name = full_seg_line
-                    if cat_name:
-                        # Try case-insensitive prefix strip
-                        if full_seg_line.upper().startswith(cat_name.upper()):
-                            seg_name = full_seg_line[len(cat_name):].strip()
-                        # If not a direct match, try stripping with normalized comparison
-                        elif cat_name.upper().replace(',', '').replace('-', ' ') in full_seg_line.upper().replace(',', '').replace('-', ' '):
-                            # Find where category name ends in the line
-                            # Simple approach: find the longest prefix match
-                            upper_line = full_seg_line.upper()
-                            upper_cat = cat_name.upper()
-                            # Walk both strings accounting for punctuation differences
-                            best_pos = 0
-                            cat_idx = 0
-                            for i, ch in enumerate(upper_line):
-                                if cat_idx >= len(upper_cat):
-                                    best_pos = i
-                                    break
-                                if ch == upper_cat[cat_idx]:
-                                    cat_idx += 1
-                                elif ch in ' ,-./()' and (cat_idx == 0 or upper_cat[cat_idx-1] in ' ,-./()' or ch != upper_cat[cat_idx]):
-                                    continue
-                            if best_pos > 0:
-                                seg_name = full_seg_line[best_pos:].strip()
+                    matched = match_category(prefix, categories)
+                    split_number = None
+                    if matched:
+                        stripped = prefix[len(matched["abbreviation"]):].lstrip("-")
+                        if len(stripped) >= 2 and stripped[:2].isdigit():
+                            split_number = int(stripped[:2])
+                    cat_name, seg_name = names_from_sheet_line(full_seg_line, matched, split_number)
 
                     if seg_name:
                         prefix_segment_names[prefix] = seg_name
@@ -402,7 +377,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 title = extract_title_from_pdf(judges_sheet_path)
                 
                 if not title:
-                    cat_name, _ = parse_prefix(prefix, categories, language=language)
+                    cat_name = prefix_category_names.get(prefix) or parse_prefix(prefix, categories)[0]
                     if cat_name:
                         title = cat_name
                     else:
@@ -572,7 +547,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
                             if not seg_name:
                                 seg_name = extract_segment_name_from_pdf(judges_sheet_path)
                             if not seg_name:
-                                _, parsed_seg = parse_prefix(prefix, categories, language=language)
+                                _, parsed_seg = parse_prefix(prefix, categories)
                                 if parsed_seg:
                                     seg_name = parsed_seg
                                 else:
@@ -581,7 +556,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
                             # 4. Category Name for the cover page
                             cat_name_cover = prefix_category_names.get(prefix)
                             if not cat_name_cover:
-                                cat_name_cover, _ = parse_prefix(prefix, categories, language=language)
+                                cat_name_cover, _ = parse_prefix(prefix, categories)
                                 
                             create_segment_cover_pdf(segment_cover_path, comp_title, dt_obj, seg_name, cat_name_cover, withdrawn_for_segment)
                          except Exception as e:
@@ -712,7 +687,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
     try:
         stats = _compute_statistics(
             categories, schedule_entries, person_tasks, prefix_withdrawn,
-            language, total_pages, withdrawn_pages_removed,
+            prefix_category_names, total_pages, withdrawn_pages_removed,
             judging_method_overrides=judging_overrides,
             combined_schedule_copies=schedule_copies if combined_schedules else 0
         )
@@ -724,7 +699,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
 
 
 def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withdrawn,
-                        language, total_pages, withdrawn_pages_removed=0,
+                        prefix_category_names, total_pages, withdrawn_pages_removed=0,
                         judging_method_overrides=None, combined_schedule_copies=0):
     """
     Build a usage-statistics dict from the structures accumulated during
@@ -767,15 +742,16 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
     for prefix in prefixes:
         matched = match_category(prefix, categories)
         if matched:
-            if language == "en":
-                category_names.add(matched["displayName"])
-            else:
-                category_names.add(matched.get("displayNameFi", matched["displayName"]))
+            # As printed on the JudgesSheetAll (split groups counted once),
+            # else the table's Finnish name
+            printed = prefix_category_names.get(prefix)
+            category_names.add(re.sub(r"\s*#\s*\d+$", "", printed) if printed
+                               else matched.get("displayNameFi", matched["displayName"]))
             competition_types.add(matched["competitionType"])
             judging_methods.add(effective_judging_method(
                 matched["abbreviation"], matched["competitionType"],
                 matched["judgingMethod"], judging_method_overrides))
-        _, segment = parse_prefix(prefix, categories, language=language)
+        _, segment = parse_prefix(prefix, categories)
         if segment and segment != "Category General":
             segment_types.add(segment)
 
@@ -824,7 +800,6 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
         "first_date": _iso_date(dates[0]) if dates else None,
         "last_date": _iso_date(dates[-1]) if dates else None,
         "judging_method": _single_or_mixed(judging_methods),
-        "language": language,
         "pages_generated": total_pages,
         "combined_schedule": combined_schedule_copies > 0,
         "combined_schedule_copies": combined_schedule_copies,

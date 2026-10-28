@@ -26,6 +26,7 @@ from categories import (
     is_synchronized_skating,
     sanitize_judging_method_overrides,
     effective_judging_method,
+    names_from_sheet_line,
 )
 from competition_schedule import parse_competition_schedule, get_schedule_start_time
 import email_sender
@@ -706,7 +707,6 @@ def _store_competition_statistics(comp_id, stats):
             "first_date": ("FirstCompetitionDate", False),
             "last_date": ("LastCompetitionDate", False),
             "judging_method": ("JudgingMethod", False),
-            "language": ("PacketLanguage", False),
             "combined_schedule": ("CombinedSchedule", False),
             "combined_schedule_copies": ("CombinedScheduleCopies", False),
         }
@@ -1654,7 +1654,6 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
 
         # Load competition settings from metadata.json
         meta = _read_competition_metadata(container, folder_path)
-        competition_language = meta.get('language', 'fi')  # Default to Finnish
         judging_overrides = sanitize_judging_method_overrides(meta.get('judgingMethodOverrides'))
 
         # FS Manager re-exports overwrite the pool copy under the same name;
@@ -1674,6 +1673,8 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
         # For enriching segment names:
         # Maps (categoryCode, raw_segment_marker) -> actual segment name
         prefix_segment_names = {}  # prefix -> segment name from JudgesSheetAll line 2
+        # category group (parsed 'category') -> its name as FSM printed it there
+        printed_category_names = {}
         schedule_blob_name = None  # Track CompetitionSchedule blob for later parsing
 
         for blob in blobs:
@@ -1749,41 +1750,14 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
                                     detected_names.add(non_empty[0])
                                     parsed['competition_name'] = non_empty[0]
                                 
-                                # Line 2 = full segment description (category + segment name)
-                                # Extract just the segment part by stripping the category display name
+                                # Line 2 = category and segment name as FSM prints them
                                 if len(non_empty) >= 2:
-                                    full_seg_line = non_empty[1]
-                                    seg_name = full_seg_line
-                                    
-                                    # Get category display name for this file
-                                    cat_display = parsed.get('category', '')
-                                    # Strip "#N" split suffix if present
-                                    cat_base = re.sub(r'\s*#\d+$', '', cat_display)
-                                    
-                                    if cat_base:
-                                        upper_line = full_seg_line.upper()
-                                        upper_cat = cat_base.upper()
-                                        if upper_line.startswith(upper_cat):
-                                            seg_name = full_seg_line[len(cat_base):].strip()
-                                        else:
-                                            # Fuzzy: normalize punctuation and try again
-                                            norm_line = re.sub(r'[,./\-]', ' ', upper_line)
-                                            norm_line = re.sub(r'\s+', ' ', norm_line).strip()
-                                            norm_cat = re.sub(r'[,./\-]', ' ', upper_cat)
-                                            norm_cat = re.sub(r'\s+', ' ', norm_cat).strip()
-                                            if norm_line.startswith(norm_cat):
-                                                # Walk original string to find split position
-                                                ci = 0
-                                                for i, ch in enumerate(full_seg_line):
-                                                    if ci >= len(norm_cat):
-                                                        seg_name = full_seg_line[i:].strip()
-                                                        break
-                                                    uch = ch.upper()
-                                                    if uch in ',.-/' or (uch == ' ' and ci > 0 and norm_cat[ci-1] == ' '):
-                                                        continue
-                                                    if ci < len(norm_cat) and uch == norm_cat[ci]:
-                                                        ci += 1
-                                    
+                                    cat_name, seg_name = names_from_sheet_line(
+                                        non_empty[1],
+                                        match_category(parsed.get('prefix', ''), categories),
+                                        parsed.get('splitNumber'))
+                                    if cat_name:
+                                        printed_category_names.setdefault(cat, cat_name)
                                     if seg_name:
                                         file_prefix = parsed.get('prefix', '')
                                         if file_prefix:
@@ -1854,14 +1828,20 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
                 })
 
         # ---------------------------------------------------------
-        # Enrich segment names using JudgesSheetAll line 2
+        # Enrich category and segment names using JudgesSheetAll line 2
         # ---------------------------------------------------------
+        # Categories are named as FSM printed them, in the competition's own
+        # language; the table's Finnish name only when no sheet could be read.
         # The raw segment keys are "QUAL", "FNL", "Category General", etc.
         # Enrich them with actual names from JudgesSheetAll (e.g., "PDK1 (Starlight Waltz)")
         # by looking up the prefix→segment_name mapping we built above.
         enriched_structure = {}
         for cat, segments in structure.items():
-            enriched_structure[cat] = {}
+            display_cat = printed_category_names.get(cat)
+            if not display_cat:
+                display_cat = next((f['categoryFi'] for files in segments.values()
+                                    for f in files if f.get('categoryFi')), cat)
+            enriched_cat = enriched_structure.setdefault(display_cat, {})
             for seg_key, files in segments.items():
                 # Find the best display name for this segment
                 display_seg = seg_key
@@ -1879,13 +1859,13 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
                         elif seg_key == "FNL":
                             display_seg = "Free Skating (FNL)"
                 
-                # Update the segment field in each file's parsed data too
+                # Update the category and segment fields in each file's parsed data too
                 for f in files:
+                    f['category'] = display_cat
+                    f.pop('categoryFi', None)
                     f['segment'] = display_seg
                 
-                if display_seg not in enriched_structure[cat]:
-                    enriched_structure[cat][display_seg] = []
-                enriched_structure[cat][display_seg].extend(files)
+                enriched_cat.setdefault(display_seg, []).extend(files)
         
         structure = enriched_structure
 
@@ -1950,7 +1930,6 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
             "fullName": comp_full_name,
             "type": comp_type_display,
             "date": comp_date_display,
-            "language": competition_language,
             # The UI sends this map back in full on every save, so it needs the
             # stored one even for categories it cannot currently see.
             "judgingMethodOverrides": judging_overrides,
@@ -1975,7 +1954,7 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="save_competition_settings", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Save competition settings (e.g. language, judgingMethodOverrides) to
+    Save competition settings (e.g. judgingMethodOverrides) to
     metadata.json. Settings are merged per key; a value that is itself a map
     (judgingMethodOverrides) is replaced wholesale, so the client must send it
     in full.
