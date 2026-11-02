@@ -49,8 +49,8 @@ def test_many_segments_stay_on_one_page(tmp_path):
     create_cover_pdf(str(path), "Competition", DATE, "Jon JUDGE", segments)
 
     [text] = page_texts(path)
-    assert "+ 4 more" in text
-    assert "Category 15, Free Skating" in text and "Category 16," not in text
+    assert "+ 5 more" in text
+    assert "Category 14, Free Skating" in text and "Category 15," not in text
 
 
 def test_a_long_label_is_shortened(tmp_path):

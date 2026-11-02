@@ -226,7 +226,8 @@ def create_cover_pdf(output_path, competition_name, date_obj, person_name, segme
 
     title_font = _font_for(competition_name, FONT_REGULAR, TABLE_FONT)
     if segments:
-        # Name block right under the logo, the segments below it
+        # Name block right under the logo, the segments at the bottom of the
+        # space below it
         c.setFont(title_font, 12)
         c.drawString(x_pos, 155 * mm, competition_name)
         c.setFont(FONT_REGULAR, 12)
@@ -235,7 +236,7 @@ def create_cover_pdf(output_path, competition_name, date_obj, person_name, segme
         name, size = _fit(c, person_name, name_font, 16, x_end - x_pos, min_size=11)
         c.setFont(name_font, size)
         c.drawString(x_pos, 136 * mm, name)
-        _draw_segment_table(c, segments, x_pos, x_end, top=128 * mm, bottom=30 * mm)
+        _draw_segment_table(c, segments, x_pos, x_end, top=124 * mm, bottom=35 * mm)
     else:
         # Vertical position: Middle of page
         y_start = height / 2 + 20 * mm
@@ -259,12 +260,10 @@ def create_cover_pdf(output_path, competition_name, date_obj, person_name, segme
 def _draw_segment_table(c, segments, x_start, x_end, top, bottom):
     """
     One row per segment: start time (bold), 'Category, Segment', the role
-    right-aligned in grey, hairlines between the rows. Rows shrink from 8 mm
-    to 5.5 mm to fit; past that the last row says how many were left out.
+    right-aligned in grey, hairlines between the rows. The table sits on
+    `bottom` and grows up to `top`: rows shrink from 8 mm to 5.5 mm to fit,
+    past that the last row says how many were left out.
     """
-    c.setLineWidth(0.5)
-    c.line(x_start, top, x_end, top)
-
     available = top - bottom
     row_h = max(5.5 * mm, min(8 * mm, available / len(segments)))
     max_rows = int(available // row_h)
@@ -273,6 +272,10 @@ def _draw_segment_table(c, segments, x_start, x_end, top, bottom):
     if len(rows) > max_rows:
         hidden = len(rows) - (max_rows - 1)
         rows = rows[:max_rows - 1]
+
+    top = bottom + (len(rows) + (1 if hidden else 0)) * row_h
+    c.setLineWidth(0.5)
+    c.line(x_start, top, x_end, top)
 
     size = min(10, row_h * 0.45)
     time_w = c.stringWidth("00:00", TABLE_FONT_BOLD, size) + 4 * mm
