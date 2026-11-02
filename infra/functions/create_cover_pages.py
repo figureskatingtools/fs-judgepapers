@@ -266,7 +266,9 @@ def _draw_segment_table(c, segments, x_start, x_end, top, bottom):
     """
     available = top - bottom
     row_h = max(5.5 * mm, min(8 * mm, available / len(segments)))
-    max_rows = int(available // row_h)
+    # From the minimum height: available // row_h can round a row that was
+    # sized to fit exactly (available / n) down to n - 1
+    max_rows = int(available // (5.5 * mm))
     rows = list(segments)
     hidden = 0
     if len(rows) > max_rows:

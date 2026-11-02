@@ -53,6 +53,19 @@ def test_many_segments_stay_on_one_page(tmp_path):
     assert "Category 14, Free Skating" in text and "Category 15," not in text
 
 
+@pytest.mark.parametrize("count", range(1, 17))
+def test_every_segment_that_fits_is_listed(tmp_path, count):
+    # 12 rows sized to fit exactly once rounded down to 11 and hid two
+    path = tmp_path / "cover.pdf"
+    segments = [(f"{8 + i:02d}:00", f"Category {i}, Free Skating", "Judge 1") for i in range(count)]
+
+    create_cover_pdf(str(path), "Competition", DATE, "Jon JUDGE", segments)
+
+    [text] = page_texts(path)
+    assert "more" not in text
+    assert all(f"Category {i}, Free Skating" in text for i in range(count))
+
+
 def test_a_long_label_is_shortened(tmp_path):
     path = tmp_path / "cover.pdf"
     label = "Aluekilpailu Minioret Tytöt #12, " + "Free Skating " * 10
