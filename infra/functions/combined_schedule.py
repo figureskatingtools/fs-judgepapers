@@ -21,32 +21,15 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (ArrayObject, ContentStream, DecodedStreamObject, DictionaryObject,
                            IndirectObject, NameObject)
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
+# Liberation Sans (Arial metrics like the FSM sheets, lining figures, Latin
+# Extended for skater names) is registered by create_cover_pages.
 try:
-    from .create_cover_pages import FOOTER_TEXT
+    from .create_cover_pages import FOOTER_TEXT, TABLE_FONT as FONT_REGULAR, TABLE_FONT_BOLD as FONT_BOLD, _fit
 except ImportError:
-    from create_cover_pages import FOOTER_TEXT
+    from create_cover_pages import FOOTER_TEXT, TABLE_FONT as FONT_REGULAR, TABLE_FONT_BOLD as FONT_BOLD, _fit
 
-FONTS_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
-
-
-def _register_fonts():
-    # Liberation Sans: Arial metrics like the FSM sheets, lining figures and
-    # Latin Extended for skater names (Raleway has neither). Best-effort, like
-    # create_cover_pages: fall back to Helvetica rather than fail the page.
-    try:
-        pdfmetrics.registerFont(TTFont("LiberationSans", os.path.join(FONTS_DIR, "LiberationSans-Regular.ttf")))
-        pdfmetrics.registerFont(TTFont("LiberationSans-Bold", os.path.join(FONTS_DIR, "LiberationSans-Bold.ttf")))
-        return "LiberationSans", "LiberationSans-Bold"
-    except Exception as e:
-        print(f"Could not register Liberation Sans fonts, falling back to Helvetica: {e}")
-        return "Helvetica", "Helvetica-Bold"
-
-
-FONT_REGULAR, FONT_BOLD = _register_fonts()
 
 # --- Parsing ---------------------------------------------------------------
 
@@ -442,17 +425,6 @@ def _printed_note(stamps):
     else:
         span = f"{lo:%d.%m.%Y} {lo.hour}.{lo:%M} – {hi:%d.%m.%Y} {hi.hour}.{hi:%M}"
     return f"Times as per the source documents. Sources printed {span}."
-
-
-def _fit(c, text, font, size, max_width, min_size=6.5):
-    """Shrink, then truncate with an ellipsis, so text fits max_width."""
-    while size > min_size and c.stringWidth(text, font, size) > max_width:
-        size -= 0.5
-    if c.stringWidth(text, font, size) > max_width:
-        while text and c.stringWidth(text + "…", font, size) > max_width:
-            text = text[:-1]
-        text += "…"
-    return text, size
 
 
 def _layout(segments, content_top):

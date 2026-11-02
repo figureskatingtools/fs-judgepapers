@@ -89,8 +89,8 @@ def setups(files):
 
 def test_same_referee_gets_the_setup_once_per_category(run):
     packets = run({
-        JUN_QUAL: ("20261107", "10:00", [("referee", "Rea REFEREE")]),
-        JUN_FNL: ("20261107", "15:00", [("referee", "Rea REFEREE")]),
+        JUN_QUAL: ("20261107", "10:00", [("referee", "Rea REFEREE", "Referee")]),
+        JUN_FNL: ("20261107", "15:00", [("referee", "Rea REFEREE", "Referee")]),
     }, {})
 
     files = packets["judgingpapers_20261107_rea_referee.pdf"]
@@ -104,8 +104,8 @@ def test_same_referee_gets_the_setup_once_per_category(run):
 
 def test_first_segment_is_the_earliest_by_start_time(run):
     packets = run({
-        JUN_QUAL: ("20261107", "15:00", [("referee", "Rea REFEREE")]),
-        JUN_FNL: ("20261107", "10:00", [("referee", "Rea REFEREE")]),
+        JUN_QUAL: ("20261107", "15:00", [("referee", "Rea REFEREE", "Referee")]),
+        JUN_FNL: ("20261107", "10:00", [("referee", "Rea REFEREE", "Referee")]),
     }, {})
 
     files = packets["judgingpapers_20261107_rea_referee.pdf"]
@@ -116,8 +116,8 @@ def test_first_segment_is_the_earliest_by_start_time(run):
 
 def test_different_referees_each_get_the_setup(run):
     packets = run({
-        JUN_QUAL: ("20261107", "10:00", [("referee", "Rea REFEREE")]),
-        JUN_FNL: ("20261107", "15:00", [("referee", "Otto OTHER")]),
+        JUN_QUAL: ("20261107", "10:00", [("referee", "Rea REFEREE", "Referee")]),
+        JUN_FNL: ("20261107", "15:00", [("referee", "Otto OTHER", "Referee")]),
     }, {})
 
     assert setups(packets["judgingpapers_20261107_rea_referee.pdf"]) == [JUN_SETUP]
@@ -126,10 +126,10 @@ def test_different_referees_each_get_the_setup(run):
 
 def test_same_referee_in_two_categories_gets_both_setups(run):
     packets = run({
-        JUN_QUAL: ("20261107", "10:00", [("referee", "Rea REFEREE")]),
-        SEN_QUAL: ("20261107", "12:00", [("referee", "Rea REFEREE")]),
-        JUN_FNL: ("20261107", "15:00", [("referee", "Rea REFEREE")]),
-        SEN_FNL: ("20261107", "17:00", [("referee", "Rea REFEREE")]),
+        JUN_QUAL: ("20261107", "10:00", [("referee", "Rea REFEREE", "Referee")]),
+        SEN_QUAL: ("20261107", "12:00", [("referee", "Rea REFEREE", "Referee")]),
+        JUN_FNL: ("20261107", "15:00", [("referee", "Rea REFEREE", "Referee")]),
+        SEN_FNL: ("20261107", "17:00", [("referee", "Rea REFEREE", "Referee")]),
     }, {})
 
     assert setups(packets["judgingpapers_20261107_rea_referee.pdf"]) == [JUN_SETUP, SEN_SETUP]
@@ -137,8 +137,8 @@ def test_same_referee_in_two_categories_gets_both_setups(run):
 
 def test_once_per_category_across_days(run):
     packets = run({
-        JUN_FNL: ("20261108", "09:00", [("referee", "Rea REFEREE")]),
-        JUN_QUAL: ("20261107", "18:00", [("referee", "Rea REFEREE")]),
+        JUN_FNL: ("20261108", "09:00", [("referee", "Rea REFEREE", "Referee")]),
+        JUN_QUAL: ("20261107", "18:00", [("referee", "Rea REFEREE", "Referee")]),
     }, {})
 
     assert setups(packets["judgingpapers_20261107_rea_referee.pdf"]) == [JUN_SETUP]
@@ -147,10 +147,10 @@ def test_once_per_category_across_days(run):
 
 def test_every_segment_option_keeps_the_old_behaviour(run):
     packets = run({
-        JUN_QUAL: ("20261107", "10:00", [("referee", "Rea REFEREE")]),
-        JUN_FNL: ("20261108", "15:00", [("referee", "Rea REFEREE")]),
-        SEN_QUAL: ("20261107", "12:00", [("referee", "Rea REFEREE")]),
-        SEN_FNL: ("20261107", "17:00", [("referee", "Rea REFEREE")]),
+        JUN_QUAL: ("20261107", "10:00", [("referee", "Rea REFEREE", "Referee")]),
+        JUN_FNL: ("20261108", "15:00", [("referee", "Rea REFEREE", "Referee")]),
+        SEN_QUAL: ("20261107", "12:00", [("referee", "Rea REFEREE", "Referee")]),
+        SEN_FNL: ("20261107", "17:00", [("referee", "Rea REFEREE", "Referee")]),
     }, {"globalCalculationSetupEverySegment": True})
 
     assert setups(packets["judgingpapers_20261107_rea_referee.pdf"]) == [JUN_SETUP, SEN_SETUP, SEN_SETUP]
@@ -159,8 +159,8 @@ def test_every_segment_option_keeps_the_old_behaviour(run):
 
 def test_a_judge_never_gets_the_setup(run):
     packets = run({
-        JUN_QUAL: ("20261107", "10:00", [("referee", "Rea REFEREE"), ("judge", "Jon JUDGE")]),
-        JUN_FNL: ("20261107", "15:00", [("judge", "Rea REFEREE"), ("referee", "Jon JUDGE")]),
+        JUN_QUAL: ("20261107", "10:00", [("referee", "Rea REFEREE", "Referee"), ("judge", "Jon JUDGE", "Judge 1")]),
+        JUN_FNL: ("20261107", "15:00", [("judge", "Rea REFEREE", "Judge 1"), ("referee", "Jon JUDGE", "Referee")]),
     }, {})
 
     # Jon referees only the final: his first segment of the category as referee

@@ -40,6 +40,16 @@ def get_date_from_start_list(pdf_path):
         print(f"Error extracting date from {pdf_path}: {e}")
     return None
 
+# A table row with two time columns (the start-time and end-time window).
+# Real PDFs use dot separators (11.10.00-11.15.00) or colon separators
+# (11:10:00  11:15:00). Handle both, with optional dash/space between.
+_TIME_ROW_RE = re.compile(
+    r'(\d{1,2}[.:]+\d{2}[.:]+\d{2})'
+    r'[\s\-]+'
+    r'(\d{1,2}[.:]+\d{2}[.:]+\d{2})'
+)
+
+
 def get_first_start_time_from_start_list(pdf_path):
     """
     Extract the first skater/team start time from a StartListwithTimes PDF.
@@ -53,16 +63,8 @@ def get_first_start_time_from_start_list(pdf_path):
         text = reader.pages[0].extract_text(extraction_mode="layout")
         if not text:
             return None
-        # Match table rows that contain two time columns.
-        # Real PDFs use dot separators (11.10.00-11.15.00) or colon separators
-        # (11:10:00  11:15:00). Handle both, with optional dash/space between.
-        time_row_pattern = re.compile(
-            r'(\d{1,2}[.:]+\d{2}[.:]+\d{2})'
-            r'[\s\-]+'
-            r'(\d{1,2}[.:]+\d{2}[.:]+\d{2})'
-        )
         for line in text.split('\n'):
-            m = time_row_pattern.search(line)
+            m = _TIME_ROW_RE.search(line)
             if m:
                 # Found the first skater row — extract start time
                 raw = m.group(1)
@@ -77,8 +79,32 @@ def get_first_start_time_from_start_list(pdf_path):
     return None
 
 
+def get_last_end_time_from_start_list(pdf_path):
+    """
+    The end time of the last timed row of a StartListwithTimes PDF (every
+    page): when the segment is scheduled to finish. Returns "HH:MM" or None.
+    """
+    last = None
+    try:
+        reader = PdfReader(pdf_path)
+        for page in reader.pages:
+            text = page.extract_text(extraction_mode="layout") or ""
+            for line in text.split('\n'):
+                m = _TIME_ROW_RE.search(line)
+                if m:
+                    last = m.group(2)
+    except Exception as e:
+        print(f"Error extracting end time from {pdf_path}: {e}")
+        return None
+    if not last:
+        return None
+    hh, mm = re.findall(r'\d+', last)[:2]
+    return f"{hh.zfill(2)}:{mm}"
+
+
 def get_panel_info(pdf_path):
-    # Returns list of (role, name, original_name)
+    # Returns list of (role, name, label): label is the role as printed, with
+    # a judge's position shortened ('Judge No.3' -> 'Judge 3').
     # Handles TS1 vs TS2 distinction
     panel_info = []
     try:
@@ -121,7 +147,8 @@ def get_panel_info(pdf_path):
                     
                     if role:
                         clean_name = re.sub(r'^(Ms\.|Mr\.|Dr\.)\s*', '', name_part).strip()
-                        panel_info.append((role, clean_name))
+                        label = re.sub(r'^Judge\s+No\.?\s*(\d+)', r'Judge \1', role_part)
+                        panel_info.append((role, clean_name, label))
                         
     except Exception as e:
         print(f"Error reading panel info from {pdf_path}: {e}")

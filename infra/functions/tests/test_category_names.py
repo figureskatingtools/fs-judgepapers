@@ -82,7 +82,7 @@ def generate(tmp_path, monkeypatch):
         monkeypatch.setattr(processor, "create_cover_pdf", lambda *a, **k: None)
         monkeypatch.setattr(processor, "get_date_from_start_list", lambda path: "20261107")
         monkeypatch.setattr(processor, "get_first_start_time_from_start_list", lambda path: "10:00")
-        monkeypatch.setattr(processor, "get_panel_info", lambda path: [("judge", "Jon JUDGE")])
+        monkeypatch.setattr(processor, "get_panel_info", lambda path: [("judge", "Jon JUDGE", "Judge 1")])
         monkeypatch.setattr(processor, "create_segment_cover_pdf",
                             lambda path, title, dt, seg, cat, withdrawn: covers.append((title, seg, cat)))
         monkeypatch.setattr(processor, "merge_pdfs", lambda out, files: len(files))
