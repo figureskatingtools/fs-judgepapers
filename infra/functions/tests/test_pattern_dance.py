@@ -16,10 +16,10 @@ LINES = {
     PD: "JÄÄTANSSI, ADVANCED NOVICE PDK1 (STARLIGHT WALTZ)",
     FD: "JÄÄTANSSI, ADVANCED NOVICE FREE DANCE",
 }
-PANEL = [("referee", "Rea REFEREE"), ("judge", "Jon JUDGE"),
-         ("technical_controller", "Tia CONTROLLER"),
-         ("technical_specialist_1", "Taru SPECIALIST"), ("technical_specialist_2", "Toni SECOND"),
-         ("data_operator", "Dan OPERATOR"), ("replay_operator", "Rasmus REPLAY")]
+PANEL = [("referee", "Rea REFEREE", "Referee"), ("judge", "Jon JUDGE", "Judge 1"),
+         ("technical_controller", "Tia CONTROLLER", "Technical Controller"),
+         ("technical_specialist_1", "Taru SPECIALIST", "Technical Specialist"), ("technical_specialist_2", "Toni SECOND", "Technical Specialist"),
+         ("data_operator", "Dan OPERATOR", "Data Operator"), ("replay_operator", "Rasmus REPLAY", "Replay Operator")]
 
 
 @pytest.mark.parametrize("name, expected", [

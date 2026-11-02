@@ -30,6 +30,41 @@ def _register_fonts():
 
 FONT_REGULAR, FONT_BOLD = _register_fonts()
 
+
+def _register_table_fonts():
+    # Liberation Sans: lining figures (times line up) and Latin Extended for
+    # names; Raleway has neither. Also used by combined_schedule. Best-effort.
+    try:
+        pdfmetrics.registerFont(TTFont("LiberationSans", os.path.join(FONTS_DIR, "LiberationSans-Regular.ttf")))
+        pdfmetrics.registerFont(TTFont("LiberationSans-Bold", os.path.join(FONTS_DIR, "LiberationSans-Bold.ttf")))
+        return "LiberationSans", "LiberationSans-Bold"
+    except Exception as e:
+        print(f"Could not register Liberation Sans fonts, falling back to Helvetica: {e}")
+        return "Helvetica", "Helvetica-Bold"
+
+
+TABLE_FONT, TABLE_FONT_BOLD = _register_table_fonts()
+
+
+def _fit(c, text, font, size, max_width, min_size=6.5):
+    """Shrink, then truncate with an ellipsis, so text fits max_width."""
+    while size > min_size and c.stringWidth(text, font, size) > max_width:
+        size -= 0.5
+    if c.stringWidth(text, font, size) > max_width:
+        while text and c.stringWidth(text + "…", font, size) > max_width:
+            text = text[:-1]
+        text += "…"
+    return text, size
+
+
+def _font_for(text, font, fallback):
+    """font, or fallback when font lacks a glyph of text (Raleway has no Latin Extended: Č, Ł, …)."""
+    try:
+        glyphs = pdfmetrics.getFont(font).face.charToGlyph
+    except AttributeError:
+        return font  # a standard font (Helvetica) after a failed registration
+    return font if all(ord(ch) in glyphs for ch in text if not ch.isspace()) else fallback
+
 def slugify(text):
     text = text.lower()
     replacements = {
@@ -146,7 +181,29 @@ def _draw_footer(c, x_start, x_end, footer_y_line=25 * mm, footer_y_text=20 * mm
     c.setFont(FONT_REGULAR, size)
     c.drawRightString(x_end, footer_y_text, FOOTER_TEXT)
 
-def create_cover_pdf(output_path, competition_name, date_obj, person_name):
+# Role groups of the day-document check block: key -> (singular, plural)
+ROLE_GROUP_NAMES = {
+    "judge": ("judge", "judges"),
+    "referee": ("referee", "referees"),
+    "technical_controller": ("technical controller", "technical controllers"),
+    "technical_specialist": ("technical specialist", "technical specialists"),
+    "data_operator": ("data operator", "data operators"),
+    "replay_operator": ("replay operator", "replay operators"),
+}
+
+COVER_TEXT_GREY = 0.35
+COVER_RULE_GREY = 0.82
+SUMMARY_GREY = 0.4
+
+
+def create_cover_pdf(output_path, competition_name, date_obj, person_name, segments=None, day_summary=None):
+    """
+    The personal cover: landscape A4 folded down the middle, the right half
+    being the front. segments = [(time 'HH:MM' or None, 'Category, Segment',
+    role label)] in running order, listed under the name. day_summary (see
+    _draw_day_summary) goes to the bottom-left corner, the back cover once
+    folded: only the first cover of the day document gets one.
+    """
     c = canvas.Canvas(output_path, pagesize=landscape(A4))
     width, height = landscape(A4)
 
@@ -154,10 +211,7 @@ def create_cover_pdf(output_path, competition_name, date_obj, person_name):
     # "second column should have some space after the center of page"
     # Center X is width/2. Let's start text at width/2 + 10mm
     x_pos = width / 2 + 10 * mm
-
-    # Vertical position: Middle of page
-    y_start = height / 2 + 20 * mm
-    line_height = 10 * mm # Space between lines
+    x_end = width - 10 * mm
 
     # Logo header at the top of the page (best-effort; never fail cover generation over the asset)
     logo_w = 50 * mm
@@ -168,22 +222,125 @@ def create_cover_pdf(output_path, competition_name, date_obj, person_name):
     except Exception as e:
         print(f"Could not draw logo on cover page: {e}")
 
-    c.setFont(FONT_REGULAR, 12)
-
-    # Draw Competition Name
-    c.drawString(x_pos, y_start, competition_name)
-
-    # Draw Date (dd.MM.yyyy)
     date_str = date_obj.strftime("%d.%m.%Y")
-    c.drawString(x_pos, y_start - line_height, date_str)
 
-    # Draw Person Name
-    c.drawString(x_pos, y_start - 2 * line_height, person_name)
+    title_font = _font_for(competition_name, FONT_REGULAR, TABLE_FONT)
+    if segments:
+        # Name block right under the logo, the segments below it
+        c.setFont(title_font, 12)
+        c.drawString(x_pos, 155 * mm, competition_name)
+        c.setFont(FONT_REGULAR, 12)
+        c.drawString(x_pos, 147 * mm, date_str)
+        name_font = _font_for(person_name, FONT_BOLD, TABLE_FONT_BOLD)
+        name, size = _fit(c, person_name, name_font, 16, x_end - x_pos, min_size=11)
+        c.setFont(name_font, size)
+        c.drawString(x_pos, 136 * mm, name)
+        _draw_segment_table(c, segments, x_pos, x_end, top=128 * mm, bottom=30 * mm)
+    else:
+        # Vertical position: Middle of page
+        y_start = height / 2 + 20 * mm
+        line_height = 10 * mm # Space between lines
+        c.setFont(title_font, 12)
+        c.drawString(x_pos, y_start, competition_name)
+        c.setFont(FONT_REGULAR, 12)
+        c.drawString(x_pos, y_start - line_height, date_str)
+        c.setFont(_font_for(person_name, FONT_REGULAR, TABLE_FONT), 12)
+        c.drawString(x_pos, y_start - 2 * line_height, person_name)
+
+    if day_summary:
+        _draw_day_summary(c, day_summary, 10 * mm, width / 2 - 10 * mm)
 
     # Footer
-    _draw_footer(c, x_pos, width - 10 * mm)
+    _draw_footer(c, x_pos, x_end)
 
     c.save()
+
+
+def _draw_segment_table(c, segments, x_start, x_end, top, bottom):
+    """
+    One row per segment: start time (bold), 'Category, Segment', the role
+    right-aligned in grey, hairlines between the rows. Rows shrink from 8 mm
+    to 5.5 mm to fit; past that the last row says how many were left out.
+    """
+    c.setLineWidth(0.5)
+    c.line(x_start, top, x_end, top)
+
+    available = top - bottom
+    row_h = max(5.5 * mm, min(8 * mm, available / len(segments)))
+    max_rows = int(available // row_h)
+    rows = list(segments)
+    hidden = 0
+    if len(rows) > max_rows:
+        hidden = len(rows) - (max_rows - 1)
+        rows = rows[:max_rows - 1]
+
+    size = min(10, row_h * 0.45)
+    time_w = c.stringWidth("00:00", TABLE_FONT_BOLD, size) + 4 * mm
+    role_w = max(c.stringWidth(role or "", TABLE_FONT, size) for _, _, role in rows) if rows else 0
+    label_x = x_start + time_w
+    label_max = x_end - label_x - role_w - 4 * mm
+
+    y = top
+    for i, (time, label, role) in enumerate(rows):
+        baseline = y - row_h / 2 - size * 0.35
+        c.setFillGray(0)
+        c.setFont(TABLE_FONT_BOLD, size)
+        c.drawString(x_start, baseline, time or "–")
+        text, label_size = _fit(c, label or "", TABLE_FONT, size, label_max)
+        c.setFont(TABLE_FONT, label_size)
+        c.drawString(label_x, baseline, text)
+        if role:
+            c.setFillGray(COVER_TEXT_GREY)
+            c.setFont(TABLE_FONT, size)
+            c.drawRightString(x_end, baseline, role)
+        y -= row_h
+        if i < len(rows) - 1 or hidden:
+            c.setStrokeGray(COVER_RULE_GREY)
+            c.setLineWidth(0.3)
+            c.line(x_start, y, x_end, y)
+    if hidden:
+        c.setFillGray(COVER_TEXT_GREY)
+        c.setFont(TABLE_FONT, size)
+        c.drawString(label_x, y - row_h / 2 - size * 0.35, f"+ {hidden} more")
+    c.setFillGray(0)
+    c.setStrokeGray(0)
+
+
+def _format_role_groups(roles):
+    parts = []
+    for key, count in roles:
+        singular, plural = ROLE_GROUP_NAMES.get(key, (key, key))
+        parts.append(f"{count} {singular if count == 1 else plural}")
+    return " · ".join(parts)
+
+
+def _draw_day_summary(c, summary, x_start, x_end):
+    """
+    Small grey check block for the Results Service folding the printed day
+    document, at the bottom-left (the back cover once folded). summary:
+    {date (datetime), packets, roles [(ROLE_GROUP_NAMES key, people)],
+     categories, segments, start, end ('HH:MM' or None), pages, file_name}
+    """
+    date = summary["date"]
+    start, end = summary.get("start"), summary.get("end")
+    schedule = f"{start or '?'}–{end or '?'}" if (start or end) else "–"
+    lines = [
+        (TABLE_FONT_BOLD, f"RESULTS SERVICE CHECK · {date.strftime('%A')} {date.strftime('%d.%m.%Y')}"),
+        (TABLE_FONT, f"Packets {summary['packets']}"
+                     + (f": {_format_role_groups(summary['roles'])}" if summary.get("roles") else "")),
+        (TABLE_FONT, f"Categories {summary['categories']} · Segments {summary['segments']} · Schedule {schedule}"),
+        (TABLE_FONT, f"Pages {summary['pages']} · {summary['file_name']}"),
+    ]
+    size, leading = 7, 9
+    y = 12 * mm + leading * (len(lines) - 1)
+    c.setFillGray(SUMMARY_GREY)
+    for font, text in lines:
+        text, line_size = _fit(c, text, font, size, x_end - x_start, min_size=5.5)
+        c.setFont(font, line_size)
+        c.drawString(x_start, y, text)
+        y -= leading
+    c.setFillGray(0)
+
 
 def create_segment_cover_pdf(output_path, competition_name, date_obj, segment_name, category_name=None, withdrawn_competitors=None):
     # Vertical A4 for Segment Cover

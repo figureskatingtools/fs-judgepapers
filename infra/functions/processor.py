@@ -4,11 +4,13 @@ import re
 import zipfile
 from datetime import datetime
 
+from pypdf import PdfReader
+
 # Import functions from existing scripts
 try:
     from .split_judges_sheets import split_pdf, filter_withdrawn_pages
     from .create_cover_pages import create_cover_pdf, create_segment_cover_pdf, create_start_list_with_strikethrough, extract_title_from_pdf, extract_segment_name_from_pdf
-    from .combine_judging_papers import get_date_from_start_list, get_first_start_time_from_start_list, get_panel_info, merge_pdfs, slugify
+    from .combine_judging_papers import get_date_from_start_list, get_first_start_time_from_start_list, get_last_end_time_from_start_list, get_panel_info, merge_pdfs, slugify
     from .categories import load_categories, match_category, parse_filename_generic, effective_judging_method, names_from_sheet_line
     from .competition_schedule import parse_competition_schedule, get_schedule_start_time
     from .combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
@@ -16,7 +18,7 @@ except ImportError:
     # Fallback for local testing if not running as package
     from split_judges_sheets import split_pdf, filter_withdrawn_pages
     from create_cover_pages import create_cover_pdf, create_segment_cover_pdf, create_start_list_with_strikethrough, extract_title_from_pdf, extract_segment_name_from_pdf
-    from combine_judging_papers import get_date_from_start_list, get_first_start_time_from_start_list, get_panel_info, merge_pdfs, slugify
+    from combine_judging_papers import get_date_from_start_list, get_first_start_time_from_start_list, get_last_end_time_from_start_list, get_panel_info, merge_pdfs, slugify
     from categories import load_categories, match_category, parse_filename_generic, effective_judging_method, names_from_sheet_line
     from competition_schedule import parse_competition_schedule, get_schedule_start_time
     from combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
@@ -272,6 +274,72 @@ def build_combined_schedules(source_dir, dates, prefix_start_times, prefix_segme
     return written
 
 
+def cover_segment_label(prefix, prefix_category_names, prefix_segment_names):
+    """
+    'Category, Segment' for the personal cover, as printed on the segment's
+    JudgesSheetAll (no table lookup, no translation); the prefix when the
+    sheet gave nothing.
+    """
+    names = [n for n in (prefix_category_names.get(prefix), prefix_segment_names.get(prefix)) if n]
+    return ", ".join(names) or prefix
+
+
+# Panel roles -> the role groups counted in the day document's check block
+# (create_cover_pages.ROLE_GROUP_NAMES), in the order they're listed
+DAY_ROLE_GROUPS = {
+    'judge': 'judge',
+    'referee': 'referee',
+    'technical_controller': 'technical_controller',
+    'technical_specialist_1': 'technical_specialist',
+    'technical_specialist_2': 'technical_specialist',
+    'data_operator': 'data_operator',
+    'replay_operator': 'replay_operator',
+}
+
+
+def day_summary(date_str, persons, pages, file_name, prefix_start_times, prefix_end_times,
+                prefix_category_names, categories=None):
+    """
+    The check block on the first cover of a day document, for the Results
+    Service folding the printout: packets (one per person in `persons`) and
+    people per role group, distinct categories and segments, the day's first
+    start and last end, and the document's page count.
+    """
+    people = {}
+    prefixes = set()
+    for slug, data in persons.items():
+        for prefix, role in data['tasks']:
+            prefixes.add(prefix)
+            group = DAY_ROLE_GROUPS.get(role)
+            if group:
+                people.setdefault(group, set()).add(slug)
+
+    # One per category: split groups ('… #2') of one category count once
+    category_keys = set()
+    for prefix in prefixes:
+        printed = prefix_category_names.get(prefix)
+        if printed:
+            category_keys.add(re.sub(r"\s*#\s*\d+$", "", printed).casefold())
+        else:
+            matched = match_category(prefix, categories or [])
+            category_keys.add(matched["abbreviation"] if matched else prefix)
+
+    starts = [t for t in (prefix_start_times.get(p) for p in prefixes) if time_sort_key(t) is not None]
+    ends = [t for t in (prefix_end_times.get(p) for p in prefixes) if time_sort_key(t) is not None]
+    order = list(dict.fromkeys(DAY_ROLE_GROUPS.values()))
+    return {
+        'date': datetime.strptime(date_str, "%Y%m%d"),
+        'packets': len(persons),
+        'roles': [(group, len(people[group])) for group in order if group in people],
+        'categories': len(category_keys),
+        'segments': len(prefixes),
+        'start': min(starts, key=time_sort_key) if starts else None,
+        'end': max(ends, key=time_sort_key) if ends else None,
+        'pages': pages,
+        'file_name': file_name,
+    }
+
+
 def process_judging_papers(source_dir, output_dir, options=None):
     if options is None:
         options = {}
@@ -297,6 +365,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
     print("\n[0] Parsing CompetitionSchedule...")
     schedule_entries = []
     prefix_start_times = {}   # prefix -> "HH:MM" start time
+    prefix_end_times = {}     # prefix -> "HH:MM" end of the StartList's last row
     prefix_segment_names = {} # prefix -> actual segment name from JudgesSheetAll
     prefix_category_names = {} # prefix -> category name as printed on its JudgesSheetAll
     prefix_withdrawn = {}     # prefix -> list of withdrawn competitor names
@@ -364,9 +433,9 @@ def process_judging_papers(source_dir, output_dir, options=None):
                     prefix_withdrawn[prefix] = withdrawn
 
     # ---------------------------------------------------------
-    # 2. Gather Data and Generate Cover Pages
+    # 2. Gather the panels (who does what, on which day)
     # ---------------------------------------------------------
-    print("\n[2/5] Generating Cover Pages...")
+    print("\n[2/5] Reading the panels...")
     
     # Data structure to hold tasks for the final merge
     person_tasks = {}
@@ -397,7 +466,10 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 if first_time:
                     prefix_start_times[prefix] = first_time
                     print(f"  {prefix} -> start time (from StartList): {first_time}")
-                    
+                last_time = get_last_end_time_from_start_list(start_list_path)
+                if last_time:
+                    prefix_end_times[prefix] = last_time
+
                 # Extract Title
                 title = extract_title_from_pdf(judges_sheet_path)
                 
@@ -412,7 +484,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 panel = get_panel_info(panel_path)
                 
                 # Process each person in the panel
-                for role, name in panel:
+                for role, name, label in panel:
                     slug = slugify(name)
                     
                     if date_str not in person_tasks:
@@ -423,22 +495,13 @@ def process_judging_papers(source_dir, output_dir, options=None):
                         person_tasks[date_str][slug] = {
                             'name': name,
                             'title': title,
-                            'tasks': []
+                            'tasks': [],
+                            'role_labels': {},  # (prefix, role) -> role as the panel prints it
                         }
-                        
-                        # Generate Cover Page
-                        # We save it in the source directory (or root of source) to keep it simple
-                        cover_filename = f"coverpage_{date_str}_{slug}.pdf"
-                        cover_path = os.path.join(root, cover_filename)
-                        
-                        try:
-                            dt = datetime.strptime(date_str, "%Y%m%d")
-                            create_cover_pdf(cover_path, title, dt, name)
-                        except ValueError:
-                            print(f"  Error parsing date {date_str} for cover page")
-                        
+
                     # Add this segment task to the person
                     person_tasks[date_str][slug]['tasks'].append((prefix, role))
+                    person_tasks[date_str][slug]['role_labels'][(prefix, role)] = label
 
     # ---------------------------------------------------------
     # 2.5 Filter Conflicts (Referee overrides Judge)
@@ -472,6 +535,28 @@ def process_judging_papers(source_dir, output_dir, options=None):
         combined_schedules = build_combined_schedules(
             source_dir, set(person_tasks.keys()), prefix_start_times,
             prefix_segment_names, prefix_withdrawn)
+
+    # ---------------------------------------------------------
+    # 2.7 Personal cover pages, listing the person's segments of the day
+    # ---------------------------------------------------------
+    print("\n[2.7] Generating Cover Pages...")
+    for date_str, persons in person_tasks.items():
+        try:
+            dt = datetime.strptime(date_str, "%Y%m%d")
+        except ValueError:
+            print(f"  Error parsing date {date_str} for cover page")
+            continue
+        for slug, data in persons.items():
+            # Sort tasks by start time from CompetitionSchedule (earliest first).
+            # Falls back to prefix alphabetical order if no schedule data available.
+            data['tasks'].sort(key=lambda x: prefix_start_times.get(x[0], "99:99"))
+            data['cover_segments'] = [
+                (prefix_start_times.get(prefix),
+                 cover_segment_label(prefix, prefix_category_names, prefix_segment_names),
+                 data['role_labels'].get((prefix, role)) or role.replace("_", " ").capitalize())
+                for prefix, role in data['tasks']]
+            data['cover_path'] = os.path.join(source_dir, f"coverpage_{date_str}_{slug}.pdf")
+            create_cover_pdf(data['cover_path'], data['title'], dt, data['name'], data['cover_segments'])
 
     # ---------------------------------------------------------
     # 3. Combine Papers
@@ -512,29 +597,16 @@ def process_judging_papers(source_dir, output_dir, options=None):
     # Days in date order (YYYYMMDD), so "first segment" spans days too
     for date_str, persons in sorted(person_tasks.items()):
         for slug, data in persons.items():
-            tasks = data['tasks']
-            # Sort tasks by start time from CompetitionSchedule (earliest first).
-            # Falls back to prefix alphabetical order if no schedule data available.
-            tasks.sort(key=lambda x: prefix_start_times.get(x[0], "99:99"))
-            
+            tasks = data['tasks']  # in running order (step 2.7)
+
             file_list = []
-            
+
             # 1. Add Cover Page
-            cover_filename = f"coverpage_{date_str}_{slug}.pdf"
-            cover_path = os.path.join(source_dir, cover_filename) 
-            
-            if os.path.exists(cover_path):
+            cover_path = data.get('cover_path')
+            if cover_path and os.path.exists(cover_path):
                 file_list.append(cover_path)
             else:
-                # Try searching recursively if not found in root
-                found = False
-                for r, d, f in os.walk(source_dir):
-                    if cover_filename in f:
-                        file_list.append(os.path.join(r, cover_filename))
-                        found = True
-                        break
-                if not found:
-                    print(f"  Warning: Cover page not found for a person on {date_str}")
+                print(f"  Warning: Cover page not found for a person on {date_str}")
 
             # 2. Add Segment Files
             for prefix, role in tasks:
@@ -648,7 +720,9 @@ def process_judging_papers(source_dir, output_dir, options=None):
             output_path = os.path.join(output_dir, output_filename)
             
             print(f"  Creating a personal packet for {date_str}...")
-            total_pages += merge_pdfs(output_path, file_list) or 0
+            data['file_list'] = file_list
+            data['pages'] = merge_pdfs(output_path, file_list) or 0
+            total_pages += data['pages']
             count += 1
 
     if setup_skipped:
@@ -663,6 +737,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
     
     for date_str, persons in person_tasks.items():
         daily_files = []
+        day_slugs = []  # people whose packet is in the day document, in its order
         sorted_slugs = sorted(persons.keys())
         
         for slug in sorted_slugs:
@@ -670,6 +745,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
             filepath = os.path.join(output_dir, filename)
             if os.path.exists(filepath):
                 daily_files.append(filepath)
+                day_slugs.append(slug)
         
         # The day's combined time schedule at the end of the whole document,
         # in as many copies as asked for
@@ -679,8 +755,36 @@ def process_judging_papers(source_dir, output_dir, options=None):
         if daily_files:
             daily_output_filename = f"judgingpapers_{date_str}.pdf"
             daily_output_path = os.path.join(output_dir, daily_output_filename)
+
+            # The first cover gets the Results Service's check block (packets,
+            # categories, segments, times, pages): the first packet is merged
+            # from its parts with that cover in front. Best-effort.
+            expected_pages = None
+            try:
+                first = persons[day_slugs[0]]
+                parts = first.get('file_list') or []
+                if parts and parts[0] == first.get('cover_path'):
+                    # The check cover replaces one page with one page
+                    pages = sum(persons[slug]['pages'] for slug in day_slugs)
+                    if date_str in combined_schedules:
+                        pages += len(PdfReader(combined_schedules[date_str]).pages) * schedule_copies
+                    summary = day_summary(
+                        date_str, {slug: persons[slug] for slug in day_slugs}, pages,
+                        daily_output_filename, prefix_start_times, prefix_end_times,
+                        prefix_category_names, categories)
+                    day_cover = os.path.join(source_dir, f"coverpage_{date_str}_{day_slugs[0]}_day.pdf")
+                    create_cover_pdf(day_cover, first['title'], summary['date'], first['name'],
+                                     first['cover_segments'], summary)
+                    if os.path.exists(day_cover):
+                        daily_files = [day_cover] + parts[1:] + daily_files[1:]
+                        expected_pages = pages
+            except Exception as e:
+                print(f"  Warning: Could not add the check block to {daily_output_filename}: {type(e).__name__}")
+
             print(f"  Creating daily summary: {daily_output_filename} ({len(daily_files)} files)")
-            merge_pdfs(daily_output_path, daily_files)
+            merged_pages = merge_pdfs(daily_output_path, daily_files)
+            if expected_pages is not None and merged_pages != expected_pages:
+                print(f"  Warning: {daily_output_filename} has {merged_pages} pages, its check block says {expected_pages}")
 
     # ---------------------------------------------------------
     # 5. Zip and Cleanup
