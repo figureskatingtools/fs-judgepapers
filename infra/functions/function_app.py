@@ -1557,6 +1557,18 @@ def auto_delete_expired_competitions(timer: func.TimerRequest) -> None:
         logging.error(f"Deleted-row scrub error: {e}")
 
 
+def _type_key(competition_type):
+    """The identity of a table competition type: spelling differences in case
+    ('Synchronized skating' / 'Synchronized Skating') are one type."""
+    return (competition_type or "").strip().casefold()
+
+
+def _type_display(competition_type):
+    """One canonical spelling for the UI: sentence case ('Synchronized skating')."""
+    t = (competition_type or "").strip()
+    return t[:1].upper() + t[1:].lower()
+
+
 def _get_categories():
     """Load categories from the Azure Table, with caching."""
     try:
@@ -1665,7 +1677,10 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
         files_data = []
         structure = {} # { category: { segment: [files] } }
         
-        detected_types = set()
+        # Competition types keyed casefolded: the categories table spells the
+        # same type both 'Synchronized skating' and 'Synchronized Skating', and
+        # a competition mixing those rows is not a "Mixed" competition.
+        detected_types = {}
         detected_names = set()
         detected_dates = set()
         detected_category_codes = set()
@@ -1723,7 +1738,7 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
                 
                 # Analyze Type (now from categories table, skip 'Competition' pseudo-type)
                 if parsed.get('type') and parsed['type'] != 'Competition':
-                    detected_types.add(parsed['type'])
+                    detected_types.setdefault(_type_key(parsed['type']), parsed['type'])
                 
                 # Analyze Name (from JudgesSheetAll)
                 if "JudgesDetailsAll" in parsed['suffix'] or "JudgesSheetAll" in parsed['suffix']:
@@ -1882,7 +1897,9 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
                 logging.warning(f"Error parsing CompetitionSchedule: {ex}")
 
         # Process metadata
-        comp_type_display = list(detected_types)[0] if len(detected_types) == 1 else "Unknown" if len(detected_types) == 0 else "Mixed"
+        comp_type_display = (_type_display(next(iter(detected_types.values())))
+                             if len(detected_types) == 1
+                             else "Unknown" if not detected_types else "Mixed")
         comp_full_name = list(detected_names)[0] if len(detected_names) == 1 else "-"         
         
         # Process dates

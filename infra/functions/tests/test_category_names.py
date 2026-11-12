@@ -26,6 +26,19 @@ JUN_ISU = {"abbreviation": "FSKWSINGLES-JUNISU", "displayName": "Junior Women (I
 NOV_JR = {"abbreviation": "FSKWSINGLES-NOVJR", "displayName": "Novice Girls Jr.",
           "displayNameFi": "Noviisitytöt Jr.", "competitionType": "Figure skating",
           "judgingMethod": "ISU"}
+AIKU = {"abbreviation": "FSKXSYNCHRONMLAIKU", "displayName": "Aikuiset",
+        "displayNameFi": "Aikuiset", "competitionType": "Synchronized skating",
+        "judgingMethod": "MUPI"}
+MLKNOV = {"abbreviation": "FSKXSYNCHRONMLKNOV", "displayName": "Noviisit, Mupi",
+          "displayNameFi": "Noviisit, Mupi", "competitionType": "Synchronized skating",
+          "judgingMethod": "MUPI"}
+MLMINO = {"abbreviation": "FSKXSYNCHRONMLMINO", "displayName": "Minorit",
+          "displayNameFi": "Minorit", "competitionType": "Synchronized skating",
+          "judgingMethod": "ISU"}
+# The table spells the ISU synchro rows with a capital S; the same type all the same.
+ADVNOV = {"abbreviation": "FSKXSYNCHRONADVNOV", "displayName": "Advanced Novice, Synchronized Skating",
+          "displayNameFi": "SM-Noviisit", "competitionType": "Synchronized Skating",
+          "judgingMethod": "ISU"}
 CATEGORIES = [JUN, ASILM]
 
 
@@ -55,6 +68,16 @@ CATEGORIES = [JUN, ASILM]
     # Nothing to split on: no category, the whole line is the segment
     ("JUNIORDAMER", JUN, None, (None, "JUNIORDAMER")),
     ("", JUN, None, (None, None)),
+    # The organizer's name is longer than the table's: the segment name, not the
+    # table name, says where the category ends
+    ("AIKUISET MUPI FREE SKATING", AIKU, None, ("AIKUISET MUPI", "FREE SKATING")),
+    ("AIKUISET MUPI SHORT PROGRAM", AIKU, 1, ("AIKUISET MUPI #1", "SHORT PROGRAM")),
+    ("NOVIISIT, MUPI FREE SKATING", MLKNOV, None, ("NOVIISIT, MUPI", "FREE SKATING")),
+    # A numbered segment is still a segment: the table split stands
+    ("MINORIT FREE SKATING 1", MLMINO, None, ("MINORIT", "FREE SKATING 1")),
+    ("MINORIT FREE SKATING 2", MLMINO, None, ("MINORIT", "FREE SKATING 2")),
+    # No known segment anywhere on the line: the table split stands (documented)
+    ("AIKUISET MUPI KORTPROGRAM", AIKU, None, ("AIKUISET", "MUPI KORTPROGRAM")),
 ])
 def test_names_from_sheet_line(line, category, split, expected):
     assert names_from_sheet_line(line, category, split) == expected
@@ -154,6 +177,24 @@ def test_file_list_uses_the_printed_category_name(details):
     assert not any("categoryFi" in f for f in data["files"])
     # The stored language setting is gone from the response
     assert "language" not in data
+
+
+def test_competition_type_ignores_the_table_rows_capitalisation(details, monkeypatch):
+    monkeypatch.setattr(fa, "_get_categories", lambda: [ADVNOV, AIKU])
+    data = details({
+        "FSKXSYNCHRONADVNOV----FNL-000100--_StartListwithTimes.pdf": b"%PDF-1.4",
+        "FSKXSYNCHRONMLAIKU----FNL-000100--_StartListwithTimes.pdf": b"%PDF-1.4",
+    })
+    assert data["type"] == "Synchronized skating"
+
+
+def test_two_real_competition_types_are_mixed(details, monkeypatch):
+    monkeypatch.setattr(fa, "_get_categories", lambda: [JUN, AIKU])
+    data = details({
+        f"{PREFIX}_StartListwithTimes.pdf": b"%PDF-1.4",
+        "FSKXSYNCHRONMLAIKU----FNL-000100--_StartListwithTimes.pdf": b"%PDF-1.4",
+    })
+    assert data["type"] == "Mixed"
 
 
 # --- usage statistics ----------------------------------------------------------
