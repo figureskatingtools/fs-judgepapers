@@ -238,9 +238,17 @@ def time_sort_key(time_str):
 
 # Segment names FSM prints after the category on line 2 of its sheets; used
 # when the processor has no segment name for the prefix.
-_SEGMENT_SUFFIX_RE = re.compile(
-    r"\s(SHORT PROGRAM|FREE SKATING|FREE PROGRAM|RHYTHM DANCE|FREE DANCE|PATTERN DANCE.*|PD[A-Z]?\d.*)$",
-    re.IGNORECASE)
+_SEGMENT_NAMES = r"SHORT PROGRAM|FREE SKATING|FREE PROGRAM|RHYTHM DANCE|FREE DANCE|PATTERN DANCE.*|PD[A-Z]?\d.*"
+_SEGMENT_SUFFIX_RE = re.compile(rf"\s({_SEGMENT_NAMES})$", re.IGNORECASE)
+# A whole segment name as FSM prints it, optionally numbered ('FREE SKATING 2'
+# when a category skates its free program in two groups).
+_KNOWN_SEGMENT_RE = re.compile(rf"(?:{_SEGMENT_NAMES})(?:\s+\d+)?", re.IGNORECASE)
+
+
+def is_known_segment(text):
+    """True when `text` is nothing but a segment name FSM prints after the
+    category ('FREE SKATING', 'Short Program', 'FREE SKATING 1')."""
+    return bool(_KNOWN_SEGMENT_RE.fullmatch((text or "").strip()))
 
 
 def split_title(title_line, segment_hint=None):
