@@ -22,9 +22,9 @@ import re
 import time
 
 try:
-    from .combined_schedule import split_title
+    from .combined_schedule import is_known_segment, split_title
 except ImportError:
-    from combined_schedule import split_title
+    from combined_schedule import is_known_segment, split_title
 
 # Module-level cache
 _categories_cache = None
@@ -264,6 +264,11 @@ def _name_end(line, name):
 _SPLIT_MARK_RE = re.compile(r"\s*#\s*\d+")
 
 
+def _folded(text):
+    """Letters and digits only, casefolded — how _name_end compares names."""
+    return "".join(c for c in (text or "").casefold() if c.isalnum())
+
+
 def names_from_sheet_line(line, category=None, split_number=None):
     """
     (category, segment) as FSM prints them on line 2 of a JudgesSheetAll, e.g.
@@ -273,6 +278,11 @@ def names_from_sheet_line(line, category=None, split_number=None):
     line; otherwise the line is split before a known segment name or at a gap
     of 2+ spaces (combined_schedule.split_title). A split group's '#N' is kept,
     or added from split_number when the line has none.
+
+    FSM prints the organizer's own category name, which may be longer than the
+    table's ('AIKUISET MUPI' for the row 'Aikuiset'): when what follows the
+    table name is not a segment name but the line does end in one, the split
+    before that segment wins, as long as it only extends the table name.
 
     Returns (None, line) when the line can't be split.
     """
@@ -292,6 +302,11 @@ def names_from_sheet_line(line, category=None, split_number=None):
         if mark:
             end = mark.end()
         cat_name, segment = line[:end], line[end:]
+        if not is_known_segment(segment):
+            alt_cat, alt_seg = split_title(line)
+            if (alt_seg and is_known_segment(alt_seg)
+                    and _folded(alt_cat).startswith(_folded(cat_name))):
+                cat_name, segment = alt_cat, alt_seg
     else:
         cat_name, segment = split_title(line)
         if segment is None:

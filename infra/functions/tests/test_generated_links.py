@@ -21,7 +21,7 @@ NEW_FILE = "judgingpapers_2026-11-07.pdf"
 OLD_FILE = "judgingpapers_2026-11-08.pdf"
 ZIP_FILE = "judges.zip"
 OLD_URL = ("https://stfakejudgepapers.blob.core.windows.net/fs-judgepapers/"
-           f"{FOLDER}/judgePapers/{OLD_FILE}?se=2026-11-12T10%3A00%3A00Z&sp=r&sig=OLDSIG")
+           f"{FOLDER}/judgePapers/{OLD_FILE}?se=2025-01-15T10%3A00%3A00Z&sp=r&sig=OLDSIG")
 ACCOUNT_KEY = base64.b64encode(b"\0" * 32).decode()
 
 
@@ -46,7 +46,7 @@ def seeded(tables, blobs, monkeypatch):
                BlobName=f"{FOLDER}/judgePapers/{NEW_FILE}", Description="All judge papers (PDF)")
     # Written by an older version: a stored 5-day SAS URL.
     papers.put(PartitionKey=COMP_ID, RowKey=OLD_FILE, FileName=OLD_FILE, FileSize=10,
-               Url=OLD_URL, ExpirationDate="2026-11-12T10:00:00", Description="All judge papers (PDF)")
+               Url=OLD_URL, ExpirationDate="2025-01-15T10:00:00", Description="All judge papers (PDF)")
     # Neither BlobName nor Url: the default judgePapers/<FileName>.
     papers.put(PartitionKey=COMP_ID, RowKey=ZIP_FILE, FileName=ZIP_FILE, FileSize=10,
                Description="Individual judge papers (ZIP)")
@@ -96,7 +96,9 @@ def test_details_mint_fresh_15_minute_links(role, seeded, signing, access):
 def test_old_rows_keep_their_stored_url_out_of_responses(seeded, signing):
     links = links_by_file(details())
 
-    assert "2026-11-12" not in json.dumps(links)
+    # A date no freshly minted link can carry (the old one was "today" once,
+    # which made this assertion fail on that day).
+    assert "2025-01-15" not in json.dumps(links)
 
 
 def test_a_link_never_points_outside_the_competitions_folder(seeded, signing):
