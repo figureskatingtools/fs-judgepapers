@@ -477,11 +477,12 @@ def create_start_list_with_strikethrough(input_pdf_path, output_pdf_path, withdr
                 overlay_canvas.save()
                 overlay_buffer.seek(0)
                 
-                # Merge overlay onto the original page
+                # Merge overlay onto the page once it belongs to the writer
+                # (pypdf 7 refuses to merge into a reader's page)
                 overlay_reader = PdfReader(overlay_buffer)
-                page.merge_page(overlay_reader.pages[0])
-            
-            writer.add_page(page)
+                writer.add_page(page).merge_page(overlay_reader.pages[0])
+            else:
+                writer.add_page(page)
         
         with open(output_pdf_path, "wb") as f:
             writer.write(f)

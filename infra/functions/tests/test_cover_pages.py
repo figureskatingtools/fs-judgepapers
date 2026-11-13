@@ -13,7 +13,7 @@ from reportlab.pdfgen import canvas
 
 import processor
 from combine_judging_papers import get_last_end_time_from_start_list, get_panel_info
-from create_cover_pages import create_cover_pdf
+from create_cover_pages import create_cover_pdf, create_start_list_with_strikethrough
 from test_combined_schedule import competition, day_pages, make_panel, packet_pages, sp_list  # noqa: F401
 
 DATE = datetime(2026, 9, 19)
@@ -115,6 +115,22 @@ def test_last_end_time_of_an_unreadable_file(tmp_path):
     path = tmp_path / "broken.pdf"
     path.write_bytes(b"not a pdf")
     assert get_last_end_time_from_start_list(str(path)) is None
+
+
+# --- create_start_list_with_strikethrough --------------------------------------
+
+def line_count(path):
+    return PdfReader(str(path)).pages[0].get_contents().get_data().count(b" l\n")
+
+
+def test_withdrawn_skater_is_struck_through(sp_list, tmp_path):
+    path = tmp_path / "struck.pdf"
+
+    assert create_start_list_with_strikethrough(sp_list, str(path), ["Cilla CÉDERLÖF"])
+
+    assert line_count(sp_list) == 0 and line_count(path) == 1
+    [text] = page_texts(path)
+    assert "Cilla CÉDERLÖF" in text and "Aino ÄÄRELÄ" in text
 
 
 # --- processor.day_summary ---------------------------------------------------
