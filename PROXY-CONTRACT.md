@@ -103,11 +103,16 @@ a token; 410 when the link expired, was revoked or its data is gone — no
 storage failure is a retryable 5xx, never a 410). The token is the
 authorisation for the recipient, but the link lives only as long as its
 **creator** can read the competition: rows carry the creator's `SentByTid` /
-`SentByOid` (and `SentByAdmin`, the router's admin flag when it was made), and
-for a record bound to a platform competition the endpoint re-checks
-`platform_access.role_for(...)` (30 s cache) — no read any more answers the
-same 410 as an expired link, unreadable access tables a retryable 503. Rows
-without a stored creator identity (older ones) skip that check.
+`SentByOid`, and for a record bound to a platform competition the endpoint
+re-checks `platform_access.role_for(..., is_admin=False)` (30 s cache) — no
+read any more answers the same 410 as an expired link, unreadable access
+tables a retryable 503. Rows without a stored creator identity (older ones)
+skip that check. **Known limitation:** a link an admin made through the admin
+override alone (no grant of their own; such rows carry `SentByAdmin: true`)
+skips it too, because admin status lives only in the sign-in token and can't
+be re-read at download time. Those links are listed and the owner and writers
+can revoke them; an admin who holds a grant of their own gets an ordinary,
+re-checked row. A revoked link (`RevokedUtc` set) answers 410.
 
 ## Competition access
 
@@ -172,8 +177,10 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
   read caller gets only the links they made, never recipients. `null` when
   the table can't be read.
 - `revoke_download_link` (**POST only**, body `{"id", "linkId"}` →
-  `{"status": "revoked", "linkId"}`) deletes the link's `sentemails` row, so
-  the link then answers 410. write/owner/admin may revoke any link of the
+  `{"status": "revoked", "linkId"}`) marks the link's `sentemails` row
+  revoked (`RevokedUtc`, `RevokedByTid`, `RevokedByOid`), so the link then
+  answers 410 and leaves `shareLinks`. The row is kept (it still counts toward
+  both daily limits) and goes with the competition like the others. write/owner/admin may revoke any link of the
   competition, a read caller only their own (403 `platform_read_only`
   otherwise). 404 `link_not_found: …` for an unknown or already revoked link,
   400 for a non-object body or a `linkId` that is not 64 lowercase hex.

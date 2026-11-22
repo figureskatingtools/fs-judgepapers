@@ -220,11 +220,55 @@ def test_a_legacy_row_without_creator_ids_skips_the_check(competition, tables, a
     assert download(LEGACY_TOKEN).status_code == 302
 
 
-def test_an_admins_link_is_checked_as_admin(competition, access):
+def test_a_pure_admin_override_link_is_marked_and_not_rechecked(competition, access, tables):
     access.identity(oid=ADMIN_OID, user_id=ADMIN_USER_ID)  # no grant of their own
     token = create_link(oid=ADMIN_OID, admin=True)
 
+    assert tables["sentemails"].row(COMP_ID, sha(token))["SentByAdmin"] is True
+    # Known limitation: admin status can't be re-read at download time.
+    access.grants.fail_get = HttpResponseError("throttled")
+    fa.platform_access.clear_cache()
     assert download(token).status_code == 302
+
+
+def test_an_admin_with_a_grant_of_their_own_gets_an_ordinary_row(competition, access, tables):
+    access.identity(oid=ADMIN_OID, user_id=ADMIN_USER_ID)
+    access.grant("write", user_id=ADMIN_USER_ID)
+    token = create_link(oid=ADMIN_OID, admin=True)
+
+    assert tables["sentemails"].row(COMP_ID, sha(token))["SentByAdmin"] is False
+    assert download(token).status_code == 302
+    access.grant(None, user_id=ADMIN_USER_ID)
+    assert download(token).status_code == 410
+
+
+def test_an_admin_emailing_with_a_grant_gets_an_ordinary_row(competition, access, tables):
+    access.identity(oid=ADMIN_OID, user_id=ADMIN_USER_ID)
+    access.grant("owner", user_id=ADMIN_USER_ID)
+
+    assert send_email(oid=ADMIN_OID, admin=True).status_code == 200
+    (row,) = tables["sentemails"].rows.values()
+    assert row["SentByAdmin"] is False
+
+
+def test_an_admin_emailing_without_a_grant_is_marked(competition, access, tables):
+    access.identity(oid=ADMIN_OID, user_id=ADMIN_USER_ID)
+
+    assert send_email(oid=ADMIN_OID, admin=True).status_code == 200
+    (row,) = tables["sentemails"].rows.values()
+    assert row["SentByAdmin"] is True
+
+
+def test_an_admin_link_with_unreadable_access_tables_is_503(competition, access, tables):
+    access.grants.fail_get = HttpResponseError("throttled")
+    fa.platform_access.clear_cache()
+
+    response = call(fa.create_download_link, make_request(
+        "POST", body={"id": COMP_ID, "fileName": PDF}, admin=True))
+
+    assert response.status_code == 503
+    assert text(response).startswith("platform_unavailable")
+    assert tables["sentemails"].rows == {}
 
 
 def test_a_non_admin_link_of_a_user_without_grant_is_dead(competition, access, tables):
@@ -323,13 +367,15 @@ def test_writers_revoke_anyones_link(role, competition, tables, access):
 
     assert response.status_code == 200
     assert payload(response) == {"status": "revoked", "linkId": sha("o" * 32)}
-    assert tables["sentemails"].rows == {}
+    row = tables["sentemails"].row(COMP_ID, sha("o" * 32))
+    assert row["RevokedUtc"] and row["RevokedByOid"] == USER_OID and row["RevokedByTid"] == USER_TID
 
 
 def test_an_admin_revokes_without_a_grant(competition, tables, access):
     put_link(tables, sha("o" * 32), oid=OTHER_OID)
     access.grant(None)
     assert revoke(sha("o" * 32), admin=True).status_code == 200
+    assert tables["sentemails"].row(COMP_ID, sha("o" * 32))["RevokedUtc"]
 
 
 def test_a_reader_revokes_their_own_link(competition, tables, access):
@@ -350,7 +396,7 @@ def test_a_reader_cannot_revoke_someone_elses_link(competition, tables, access):
 
     assert response.status_code == 403
     assert text(response).startswith("platform_read_only")
-    assert tables["sentemails"].row(COMP_ID, sha("o" * 32)) is not None
+    assert "RevokedUtc" not in tables["sentemails"].row(COMP_ID, sha("o" * 32))
 
 
 def test_no_access_is_404_and_revokes_nothing(competition, tables, access):
@@ -361,7 +407,7 @@ def test_no_access_is_404_and_revokes_nothing(competition, tables, access):
 
     assert response.status_code == 404
     assert text(response).startswith("platform_not_found")
-    assert tables["sentemails"].row(COMP_ID, sha("o" * 32)) is not None
+    assert "RevokedUtc" not in tables["sentemails"].row(COMP_ID, sha("o" * 32))
 
 
 def test_a_legacy_link_is_revoked_by_its_listed_id(competition, tables):
@@ -370,6 +416,46 @@ def test_a_legacy_link_is_revoked_by_its_listed_id(competition, tables):
 
     assert revoke(listed["linkId"]).status_code == 200
     assert download(LEGACY_TOKEN).status_code == 410
+
+
+def test_a_revoked_link_is_410_uncounted_and_unlisted(competition, tables):
+    token = create_link()
+    assert revoke(sha(token)).status_code == 200
+
+    response = download(token)
+
+    assert response.status_code == 410
+    assert "invalid" in text(response)
+    assert "DownloadCount" not in tables["sentemails"].row(COMP_ID, sha(token))
+    assert details()["shareLinks"] == []
+
+
+def test_a_revoked_legacy_link_is_410(competition, tables):
+    put_link(tables, LEGACY_TOKEN, hashed=False, tid=None)
+    assert revoke(sha(LEGACY_TOKEN)).status_code == 200
+    assert download(LEGACY_TOKEN).status_code == 410
+    assert revoke(sha(LEGACY_TOKEN)).status_code == 404
+
+
+def test_a_revoked_link_still_counts_toward_the_link_limit(competition, monkeypatch):
+    monkeypatch.setattr(fa, "LINK_RATE_LIMIT_PER_DAY", 1)
+    token = create_link()
+    assert revoke(sha(token)).status_code == 200
+
+    response = call(fa.create_download_link, make_request(
+        "POST", body={"id": COMP_ID, "fileName": PDF}))
+
+    assert response.status_code == 429
+
+
+def test_a_revoked_email_still_counts_toward_the_email_limit(competition, tables, monkeypatch):
+    monkeypatch.setattr(fa, "SEND_RATE_LIMIT_PER_DAY", 1)
+    assert send_email().status_code == 200
+    (row,) = tables["sentemails"].rows.values()
+    assert revoke(row["RowKey"]).status_code == 200
+    assert fa._sends_in_last_day(tables["sentemails"], USER_EMAIL) == 1
+
+    assert send_email().status_code == 429
 
 
 def test_revoking_twice_is_link_not_found(competition):
@@ -388,7 +474,7 @@ def test_a_link_of_another_competition_is_not_found(competition, tables):
                              SentByOid=USER_OID, LinkExpiry=iso(from_now(days=1)))
 
     assert revoke(sha("z" * 32)).status_code == 404
-    assert tables["sentemails"].row("other999", sha("z" * 32)) is not None
+    assert "RevokedUtc" not in tables["sentemails"].row("other999", sha("z" * 32))
 
 
 @pytest.mark.parametrize("link_id", ["", "A" * 64, "ab" * 31, "g" * 64, LEGACY_TOKEN, None, 5])

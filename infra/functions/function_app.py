@@ -2255,17 +2255,39 @@ def _links_in_last_day(sent_table, oid):
     return sum(1 for row in rows if row.get("Channel") == LINK_CHANNEL)
 
 
-def _link_creator_columns(caller):
-    """Who made a link: stored on every new sentemails row. tid + oid (and the
-    router's admin flag at the time) are re-checked against the platform's
-    grants on every download; e-mail and name are for display only."""
+def _admin_override_only(caller, entity):
+    """
+    True when `caller` reaches this competition only through the router's
+    admin flag: an admin with no grant of their own (role_for with
+    is_admin=False finds none) or a record bound to no platform competition.
+    Raises PlatformAccessUnavailable when the access tables can't be read.
+    """
+    if not caller.is_admin:
+        return False
+    guid = normalize_platform_id(entity.get("PlatformId"))
+    if guid is None:
+        return True
+    own = platform_access.role_for(guid, caller.tid, caller.oid, is_admin=False)
+    return not (own and platform_access.role_satisfies(own, "read"))
+
+
+def _link_creator_columns(caller, admin_override):
+    """Who made a link: stored on every new sentemails row. tid + oid are
+    re-checked against the platform's grants on every download
+    (_link_creator_denied); SentByAdmin marks a link made through the admin
+    override alone (_admin_override_only). E-mail and name are for display."""
     return {
         "SentBy": caller.email,
         "SentByName": caller.name or "",
         "SentByTid": caller.tid,
         "SentByOid": caller.oid,
-        "SentByAdmin": bool(caller.is_admin),
+        "SentByAdmin": bool(admin_override),
     }
+
+
+def _is_revoked(row):
+    """A revoked link keeps its row (the daily limits count it) but is dead."""
+    return bool(row.get("RevokedUtc"))
 
 
 def _created_by(row, caller):
@@ -2280,7 +2302,7 @@ def _created_by(row, caller):
 
 def _share_links(comp_id, caller, role):
     """
-    The competition's live (unexpired) download links for
+    The competition's live (unexpired, unrevoked) download links for
     get_competition_details, newest first:
     [{linkId, fileName, channel: "email"|"link", created, expiration,
       downloadCount, lastDownloaded, createdByMe, createdBy, to?, cc?}].
@@ -2306,7 +2328,7 @@ def _share_links(comp_id, caller, role):
     links = []
     for row in rows:
         expiry = _parse_iso_utc(row.get("LinkExpiry"))
-        if not expiry or expiry <= now:
+        if not expiry or expiry <= now or _is_revoked(row):
             continue
         mine = _created_by(row, caller)
         if not can_see_all and not mine:
@@ -2332,12 +2354,12 @@ def _share_links(comp_id, caller, role):
 
 
 def _find_link_row(sent_table, comp_id, link_id):
-    """The sentemails row of competition `comp_id` whose public id is
-    `link_id` (a 64-char lowercase hex string), or None."""
+    """The unrevoked sentemails row of competition `comp_id` whose public id
+    is `link_id` (a 64-char lowercase hex string), or None."""
     try:
         row = sent_table.get_entity(partition_key=comp_id, row_key=link_id)
         if _is_hashed_link_row(row):
-            return row
+            return None if _is_revoked(row) else row
     except ResourceNotFoundError:
         pass
     # Legacy rows (RowKey = the clear token) are found by the hash of their
@@ -2347,7 +2369,7 @@ def _find_link_row(sent_table, comp_id, link_id):
     try:
         for row in sent_table.query_entities(f"PartitionKey eq '{safe_pk}'"):
             if not _is_hashed_link_row(row) and hmac.compare_digest(_link_key(row["RowKey"]), link_id):
-                return row
+                return None if _is_revoked(row) else row
     except ResourceNotFoundError:
         pass
     return None
@@ -2507,6 +2529,11 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         if not blob_service_client.get_container_client(container_name).get_blob_client(blob_name).exists():
             return func.HttpResponse("Generated file not found", status_code=404)
 
+        try:
+            admin_override = _admin_override_only(ctx["caller"], ctx["entity"])
+        except PlatformAccessUnavailable:
+            return func.HttpResponse(_ACCESS_UNAVAILABLE, status_code=503)
+
         sent_table = get_table_client("sentemails")
         if not sent_table:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
@@ -2526,7 +2553,7 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
             "RowKey": key,
             LINK_KEY_KIND_COLUMN: LINK_KEY_KIND_SHA256,
             "Channel": EMAIL_CHANNEL,
-            **_link_creator_columns(ctx["caller"]),
+            **_link_creator_columns(ctx["caller"], admin_override),
             "To": to,
             "Cc": results_service_email,
             "FileName": file_name,
@@ -2659,6 +2686,11 @@ def create_download_link(req: func.HttpRequest) -> func.HttpResponse:
         if not blob_service_client.get_container_client(GENERATED_CONTAINER).get_blob_client(blob_name).exists():
             return func.HttpResponse("Generated file not found", status_code=404)
 
+        try:
+            admin_override = _admin_override_only(caller, entity)
+        except PlatformAccessUnavailable:
+            return func.HttpResponse(_ACCESS_UNAVAILABLE, status_code=503)
+
         sent_table = get_table_client("sentemails")
         if not sent_table:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
@@ -2675,7 +2707,7 @@ def create_download_link(req: func.HttpRequest) -> func.HttpResponse:
             "RowKey": key,
             LINK_KEY_KIND_COLUMN: LINK_KEY_KIND_SHA256,
             "Channel": LINK_CHANNEL,
-            **_link_creator_columns(caller),
+            **_link_creator_columns(caller, admin_override),
             "To": "",
             "Cc": "",
             "FileName": file_name,
@@ -2724,9 +2756,11 @@ def revoke_download_link(req: func.HttpRequest) -> func.HttpResponse:
     get_competition_details' shareLinks) -> {"status": "revoked", "linkId"}.
     write/owner (and admins) may revoke any link of the competition, a
     read-only caller only a link they created (else 403 platform_read_only).
-    The sentemails row is deleted, so the link then answers 410 like any link
-    whose row is gone. An unknown or already revoked link is 404
-    link_not_found.
+    The sentemails row is kept and marked (RevokedUtc, RevokedByTid/Oid): the
+    link then answers 410, it leaves shareLinks, and it still counts toward
+    the daily e-mail and link limits (deleting it would let send + revoke
+    get around them). The row goes with the competition like the others. An
+    unknown or already revoked link is 404 link_not_found.
     """
     if req.method.upper() != "POST":
         return func.HttpResponse("Method not allowed", status_code=405, headers={"Allow": "POST"})
@@ -2764,7 +2798,13 @@ def revoke_download_link(req: func.HttpRequest) -> func.HttpResponse:
         if not platform_access.role_satisfies(role, "write") and not _created_by(row, caller):
             return func.HttpResponse(_ACCESS_READ_ONLY, status_code=403)
         try:
-            sent_table.delete_entity(partition_key=row["PartitionKey"], row_key=row["RowKey"])
+            sent_table.update_entity({
+                "PartitionKey": row["PartitionKey"],
+                "RowKey": row["RowKey"],
+                "RevokedUtc": _iso_utc(datetime.now(timezone.utc)),
+                "RevokedByTid": caller.tid,
+                "RevokedByOid": caller.oid,
+            }, mode=UpdateMode.MERGE)
         except ResourceNotFoundError:
             return func.HttpResponse(_LINK_NOT_FOUND, status_code=404)
 
@@ -2813,13 +2853,28 @@ def _link_creator_denied(row, entity):
     response: the expired-link 410 when they no longer can (access removed),
     a retryable 503 when the platform's access tables can't be read (never a
     410). Rows without a stored creator identity (older ones) and records not
-    bound to a platform competition skip the check. A link an admin made is
-    checked with the admin flag it was made under.
+    bound to a platform competition skip the check.
+
+    Known limitation: a link an admin made through the admin override alone
+    (SentByAdmin, no grant of their own) skips the check too. Admin status
+    lives only in the sign-in token, never in a table this app can read, so
+    it can't be re-checked here. Such links are listed in shareLinks and the
+    owner and writers can revoke them; an admin who also holds a grant gets
+    an ordinary row, checked like anyone else's.
     """
     tid, oid = row.get("SentByTid"), row.get("SentByOid")
     guid = normalize_platform_id(entity.get("PlatformId"))
-    if not tid or not oid or guid is None:
+    if not tid or not oid or guid is None or row.get("SentByAdmin") is True:
         return None
+    try:
+        role = platform_access.role_for(guid, tid, oid, is_admin=False)
+    except PlatformAccessUnavailable:
+        logging.error(f"Download link: platform access unavailable for platform competition {guid}")
+        return func.HttpResponse("Temporarily unavailable, try again later", status_code=503,
+                                 headers={"Cache-Control": "no-store", "Retry-After": "60"})
+    if role is None or not platform_access.role_satisfies(role, "read"):
+        return _download_error(_DOWNLOAD_EXPIRED, 410)
+    return None
     try:
         role = platform_access.role_for(guid, tid, oid, is_admin=row.get("SentByAdmin") is True)
     except PlatformAccessUnavailable:
@@ -2853,7 +2908,8 @@ def download_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         if not sent_table:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
         row = _download_link_row(sent_table, token)
-        if not row:
+        if not row or _is_revoked(row):
+            # A revoked link answers like one whose row is gone.
             # A well-formed token with no row is almost always a link whose
             # competition was deleted (its sentemails rows go with it): 410.
             return _download_error(_DOWNLOAD_NOT_FOUND, 410)
