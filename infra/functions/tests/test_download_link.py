@@ -1,5 +1,6 @@
 """create_download_link ("Copy link"): the e-mail's token link for sharing
 anywhere, with the same lifetime rules, served by download_judge_papers."""
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +11,7 @@ from conftest import (
     PLATFORM_ID,
     USER_EMAIL,
     USER_OID,
+    USER_TID,
     call,
     make_request,
     payload,
@@ -63,9 +65,13 @@ def test_a_reader_gets_a_five_day_token_link(generated, tables, access, monkeypa
     assert body["url"].startswith("https://test.example.com/judgepapers/download?t=")
     expiry = fa._parse_iso_utc(body["expiration"])
     assert timedelta(days=4, hours=23) < expiry - datetime.now(timezone.utc) <= timedelta(days=5)
-    row = tables["sentemails"].row("abc12345", token_of(body["url"]))
+    token = token_of(body["url"])
+    assert tables["sentemails"].row("abc12345", token) is None  # never stored in clear
+    row = tables["sentemails"].row("abc12345", hashlib.sha256(token.encode()).hexdigest())
+    assert row["KeyKind"] == "sha256"
     assert row["Channel"] == "link"
     assert row["SentBy"] == USER_EMAIL and row["SentByOid"] == USER_OID
+    assert row["SentByTid"] == USER_TID and row["SentByAdmin"] is False
     assert row["To"] == "" and row["Cc"] == ""
     assert row["FileName"] == PDF
     assert row["LinkExpiry"] == body["expiration"]

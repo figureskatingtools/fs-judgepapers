@@ -93,11 +93,21 @@ recipient isn't signed in. The router proxies that exact public path
 (excluded from Easy Auth) to `/api/download_judge_papers?t=<token>` without a
 user header; the endpoint still requires the shared secret (`_proxy_secret_ok()`,
 fail closed, 401), then resolves the 32-character token against the
-`sentemails` table and answers `302` to a 15-minute read SAS (404 for a
-malformed token; 410 when the link expired or its data is gone — no
+`sentemails` table — by its **sha256** (the RowKey of every row written since
+2026-11, marked `KeyKind: "sha256"`; the token itself is stored nowhere), with
+a fallback to the clear-token RowKey of older rows that accepts only rows
+*without* that marker (removable after 2026-12-15) — and answers `302` to a
+15-minute read SAS (404 for a malformed token, so a 64-character hash is never
+a token; 410 when the link expired, was revoked or its data is gone — no
 `sentemails` row any more, the competition deleted, or the file removed; a
 storage failure is a retryable 5xx, never a 410). The token is the
-authorisation: no competition access check applies.
+authorisation for the recipient, but the link lives only as long as its
+**creator** can read the competition: rows carry the creator's `SentByTid` /
+`SentByOid` (and `SentByAdmin`, the router's admin flag when it was made), and
+for a record bound to a platform competition the endpoint re-checks
+`platform_access.role_for(...)` (30 s cache) — no read any more answers the
+same 410 as an expired link, unreadable access tables a retryable 503. Rows
+without a stored creator identity (older ones) skip that check.
 
 ## Competition access
 
@@ -124,7 +134,7 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
 | Need | Routes |
 |---|---|
 | none (signed in) | `check_user_permission`, `get_categories` |
-| read | `get_competition_details`, `create_download_link`, `resolve_competition` (incl. creating the empty bound record), `list_competitions` (filtered) |
+| read | `get_competition_details`, `create_download_link`, `revoke_download_link` (own links only; any link needs write), `resolve_competition` (incl. creating the empty bound record), `list_competitions` (filtered) |
 | write | `save_competition_settings`, `generate_judging_papers`, `preview_judge_papers_email`, `send_judge_papers`, `upload_file`, `import_platform_file`, `delete_file` |
 | owner | `delete_competition` — **POST only**, id from `?id=` or a JSON body `{"id"}` (405 for any other method) |
 
@@ -149,8 +159,24 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
   `generatedpapers` row and its blob (404 otherwise). It needs only **read**:
   a reader can already download the file and pass it on. Nothing is sent; the
   `sentemails` row has `Channel: "link"`, `SentBy`/`SentByOid` and no
-  recipients. 100 links per user per 24 h (429, counted by `SentByOid`;
-  fails closed with 503); links don't count toward the e-mail limit.
+  recipients. 100 links per user per 24 h (429, counted by `SentByOid` over
+  link rows; fails closed with 503); links don't count toward the e-mail
+  limit, nor e-mails toward the link limit.
+- `get_competition_details` also returns `shareLinks`: the competition's live
+  (unexpired) e-mailed and copied links, newest first —
+  `[{linkId, fileName, channel: "email"|"link", created, expiration,
+  downloadCount, lastDownloaded, createdByMe, createdBy, to?, cc?}]`
+  (`linkId` = the 64-hex RowKey hash, for an older clear-token row the
+  sha256 of it; never a token; `createdBy` = the creator's name or e-mail).
+  write/owner/admin callers get every link, and `to`/`cc` on e-mail links; a
+  read caller gets only the links they made, never recipients. `null` when
+  the table can't be read.
+- `revoke_download_link` (**POST only**, body `{"id", "linkId"}` →
+  `{"status": "revoked", "linkId"}`) deletes the link's `sentemails` row, so
+  the link then answers 410. write/owner/admin may revoke any link of the
+  competition, a read caller only their own (403 `platform_read_only`
+  otherwise). 404 `link_not_found: …` for an unknown or already revoked link,
+  400 for a non-object body or a `linkId` that is not 64 lowercase hex.
 - A record with no `PlatformId` (pre-platform legacy) is **admin-only**.
 - An unknown or deleted (hidden) record is the same 404 as no access.
 - `CreatedBy` keeps the creator's e-mail as history only; ownership is the
