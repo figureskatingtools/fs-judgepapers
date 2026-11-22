@@ -101,6 +101,29 @@ LINK_CHANNEL = "link"
 LINK_RATE_LIMIT_PER_DAY = 100
 _LINKABLE_FILE_RE = re.compile(r"[A-Za-z0-9_-]+\.(?:pdf|zip)", re.IGNORECASE)
 
+GENERATED_SUBFOLDER = "judgePapers"
+
+
+def _record_file_name(filename):
+    """A record-relative blob name from a client: `<name>` or
+    `judgePapers/<name>`, or None for anything that could leave the record's
+    folder (other folders, dot segments, backslashes, control characters)."""
+    if not isinstance(filename, str):
+        return None
+    parts = filename.split("/")
+    if len(parts) == 2 and parts[0] == GENERATED_SUBFOLDER:
+        name = parts[1]
+    elif len(parts) == 1:
+        name = parts[0]
+    else:
+        return None
+    if not name or name in (".", "..") or "\\" in name:
+        return None
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+        return None
+    return filename
+
+
 class Caller:
     """
     The signed-in user, as forwarded by the site router (PROXY-CONTRACT.md).
@@ -2829,6 +2852,13 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
     if not competition or not filename:
         return func.HttpResponse("Missing competition or filename", status_code=400)
 
+    # Only a file of this record: Blob Storage resolves `..` segments, so a raw
+    # name could reach another record's folder.
+    relative_name = _record_file_name(filename)
+    if relative_name is None:
+        return func.HttpResponse("Invalid filename", status_code=400)
+    filename = relative_name
+
     try:
         # 'competition' carries the competition id; resolve the blob folder from the table
         entity, denied = _competition_for(caller, competition, "write")
@@ -2842,7 +2872,7 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
 
         container = blob_service_client.get_container_client("fs-judgepapers")
 
-        blob_path = f"{folder_path}/{filename}"
+        blob_path = f"{folder_path}/{relative_name}"
 
         if container.get_blob_client(blob_path).exists():
             container.delete_blob(blob_path)

@@ -606,3 +606,61 @@ def test_write_owner_and_admin_rename_the_record(role, tables, blobs, platform, 
     assert tables["competitions"].row("GLOBAL", COMP_ID)["Name"] == "Autumn Cup"
     meta = json.loads(blobs.blobs[f"{row['FolderPath']}/metadata.json"].data)
     assert meta["name"] == "Autumn Cup"
+
+
+# ---------------------------------------------------------------------------
+# delete_file only ever reaches the record's own folder
+# ---------------------------------------------------------------------------
+
+def _delete_file(filename):
+    return call(fa.delete_file, make_request(
+        "POST", params={"competition": COMP_ID, "filename": filename}))
+
+
+@pytest.mark.parametrize("filename", [
+    "../victim-12345678/target.pdf",
+    "../victim-12345678/judgePapers/out.pdf",
+    "../victim-12345678/metadata.json",
+    "judgePapers/../../victim-12345678/target.pdf",
+    "judgePapers/..",
+    "..",
+    ".",
+    "/victim-12345678/target.pdf",
+    "other/target.pdf",
+    "judgePapers/sub/out.pdf",
+    "judgePapers/",
+    "..\\victim-12345678\\target.pdf",
+    "a\x00.pdf",
+    "a\n.pdf",
+])
+def test_delete_file_refuses_a_name_outside_the_record(filename, competition, tables, blobs, pool):
+    blobs.upload_blob("victim-12345678/target.pdf", b"%PDF-victim")
+    blobs.upload_blob("victim-12345678/judgePapers/out.pdf", b"%PDF-victim-out")
+    blobs.upload_blob("victim-12345678/metadata.json", "{}")
+    before = snapshot(tables, blobs, pool)
+
+    response = _delete_file(filename)
+
+    assert response.status_code == 400
+    assert text(response) == "Invalid filename"
+    assert snapshot(tables, blobs, pool) == before
+
+
+@pytest.mark.parametrize("filename", [SOURCE_FILE, f"judgePapers/{SENT_FILE}"])
+def test_delete_file_deletes_the_records_own_files(filename, competition, blobs):
+    folder = competition["FolderPath"]
+
+    response = _delete_file(filename)
+
+    assert payload(response) == {"status": "deleted"}
+    assert f"{folder}/{filename}" not in blobs.blobs
+
+
+def test_delete_file_keeps_dots_inside_a_name(competition, blobs):
+    folder = competition["FolderPath"]
+    blobs.upload_blob(f"{folder}/Start..List v1.2.pdf", b"%PDF-dots")
+
+    response = _delete_file("Start..List v1.2.pdf")
+
+    assert payload(response) == {"status": "deleted"}
+    assert f"{folder}/Start..List v1.2.pdf" not in blobs.blobs
