@@ -35,6 +35,7 @@ POOL_FILE = "Y_Pool.pdf"
 OTHER_ID = "9e9e9e9e-1111-4222-8333-444444444444"
 THIRD_ID = "7d7d7d7d-5555-4666-8777-888888888888"
 STRANGER_OID = "99999999-8888-4777-8666-555555555555"
+LINK_ID = "ab" * 32
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +62,11 @@ def competition(tables, blobs, pool, monkeypatch):
     blobs.upload_blob(f"{folder}/{SOURCE_FILE}", b"%PDF-source")
     blobs.upload_blob(f"{folder}/judgePapers/{SENT_FILE}", b"%PDF-out")
     tables["generatedpapers"].put(PartitionKey=COMP_ID, RowKey=SENT_FILE, FileName=SENT_FILE)
+    # A copied link the default caller made (revoke_download_link).
+    tables["sentemails"].put(PartitionKey=COMP_ID, RowKey=LINK_ID, KeyKind="sha256",
+                             Channel="link", SentByTid=USER_TID, SentByOid=USER_OID,
+                             FileName=SENT_FILE, SentDate="2026-11-01T10:00:00Z",
+                             LinkExpiry="2099-01-01T00:00:00Z")
     return row
 
 
@@ -99,6 +105,10 @@ ROUTES = {
     "create_download_link": ("read", lambda **kw: call(
         fa.create_download_link, make_request(
             "POST", body={"id": COMP_ID, "fileName": SENT_FILE}, **kw))),
+    # read = only a link the caller made; any link needs write (test_download_link.py)
+    "revoke_download_link": ("read", lambda **kw: call(
+        fa.revoke_download_link, make_request(
+            "POST", body={"id": COMP_ID, "linkId": LINK_ID}, **kw))),
     "upload_file": ("write", lambda **kw: call(
         fa.upload_file, make_request("POST", params={"competition": COMP_ID, "filename": "Z_New.pdf"},
                                      raw_body=b"%PDF-new", **kw))),
@@ -220,6 +230,9 @@ def test_an_unbound_record_is_admin_only(route, tables, blobs, pool, monkeypatch
     blobs.upload_blob(f"{row['FolderPath']}/{SOURCE_FILE}", b"%PDF-source")
     blobs.upload_blob(f"{row['FolderPath']}/judgePapers/{SENT_FILE}", b"%PDF-out")
     tables["generatedpapers"].put(PartitionKey=COMP_ID, RowKey=SENT_FILE, FileName=SENT_FILE)
+    tables["sentemails"].put(PartitionKey=COMP_ID, RowKey=LINK_ID, KeyKind="sha256",
+                             Channel="link", SentByTid=USER_TID, SentByOid=USER_OID,
+                             FileName=SENT_FILE, LinkExpiry="2099-01-01T00:00:00Z")
     before = snapshot(tables, blobs, pool)
 
     response = ROUTES[route][1]()
@@ -553,7 +566,7 @@ def test_send_records_the_forwarded_email_only_for_audit(competition, tables, ac
     response = ROUTES["send_judge_papers"][1](user_email="Writer@Example.com")
 
     assert response.status_code == 200
-    (row,) = tables["sentemails"].rows.values()
+    (row,) = [r for r in tables["sentemails"].rows.values() if r.get("Channel") == "email"]
     assert row["SentBy"] == "writer@example.com"
     assert row["DryRun"] is True  # no MAILGUN_API_KEY in the tests
 

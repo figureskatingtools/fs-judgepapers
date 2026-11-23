@@ -94,6 +94,9 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   }
   properties: {
     serverFarmId: appServicePlan.id
+    // HTTPS only: the router's calls carry the proxy secret and the forwarded
+    // identity headers.
+    httpsOnly: true
     siteConfig: {
       // No CORS origins: the browser never talks to this Function App directly.
       // All traffic arrives server-side from the site router proxy

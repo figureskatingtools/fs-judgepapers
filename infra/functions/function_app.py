@@ -7,6 +7,7 @@ import json
 import re
 import hmac
 import secrets
+import hashlib
 import io
 from pypdf import PdfReader
 from datetime import datetime
@@ -44,6 +45,12 @@ from platform_clock import (
 )
 import platform_access
 from platform_access import PlatformAccessUnavailable
+
+# The Azure SDK logs every storage request URL at INFO: blob paths (competition
+# and file names) and table keys would land in the 90-day logs. host.json log
+# levels don't reach Python logger names, so raise it here.
+HTTP_LOGGING_POLICY_LOGGER = "azure.core.pipeline.policies.http_logging_policy"
+logging.getLogger(HTTP_LOGGING_POLICY_LOGGER).setLevel(logging.WARNING)
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -85,6 +92,7 @@ SEND_RATE_LIMIT_PER_DAY = 20
 # The e-mailed link is ours (PUBLIC_BASE_URL/judgepapers/download?t=<token>),
 # not a blob SAS URL: Microsoft's filters junk mail linking to
 # *.blob.core.windows.net. Each click mints a short-lived SAS and redirects.
+# Exactly 32 characters, so a stored 64-hex hash can never pass as a token.
 DOWNLOAD_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32}")
 DOWNLOAD_SAS_VALIDITY = timedelta(minutes=15)
 # Links to generated files in API responses (get_competition_details): a fresh
@@ -95,11 +103,36 @@ DEFAULT_PUBLIC_BASE_URL = "https://figureskatingtools.com"
 _SENDABLE_FILE_RE = re.compile(r"judgingpapers_[A-Za-z0-9_-]+\.pdf")
 # "Copy link" (create_download_link): the e-mail's token link, for sharing
 # anywhere (WhatsApp, …) — same lifetime rules, any generated file (merged PDF
-# or ZIP), no recipients. Its sentemails row has Channel "link" and the
-# creator's object id, which its own per-user daily limit counts.
+# or ZIP), no recipients. Its sentemails row has Channel "link" (e-mail rows:
+# "email"); both carry the creator's ids (_link_creator_columns), and the
+# link rows' SentByOid is what the per-user daily link limit counts.
 LINK_CHANNEL = "link"
+EMAIL_CHANNEL = "email"
 LINK_RATE_LIMIT_PER_DAY = 100
 _LINKABLE_FILE_RE = re.compile(r"[A-Za-z0-9_-]+\.(?:pdf|zip)", re.IGNORECASE)
+# A link's sentemails RowKey is sha256(token) in hex, never the token itself;
+# such rows carry KeyKind "sha256". The same hex string is the link's public
+# id (linkId) in get_competition_details and revoke_download_link.
+LINK_KEY_KIND_COLUMN = "KeyKind"
+LINK_KEY_KIND_SHA256 = "sha256"
+LINK_ID_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _link_key(token):
+    """The sentemails RowKey (and public linkId) of a download token."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _is_hashed_link_row(row):
+    return row.get(LINK_KEY_KIND_COLUMN) == LINK_KEY_KIND_SHA256
+
+
+def _link_id(row):
+    """The public id of a sentemails row: its RowKey when that is the hash;
+    for a legacy row (RowKey = the clear token) the hash of that token, so
+    the token itself is never returned."""
+    key = row["RowKey"]
+    return key if _is_hashed_link_row(row) else _link_key(key)
 
 GENERATED_SUBFOLDER = "judgePapers"
 
@@ -249,14 +282,14 @@ def _access_error(caller, platform_id, need):
     return _access_role(caller, platform_id, need)[1]
 
 
-def _competition_for(caller, comp_id, need):
+def _competition_role_for(caller, comp_id, need):
     """
-    (entity, None) when `comp_id` names a live record the caller holds `need`
-    on, else (None, error response). An unknown or deleted (hidden) record is
-    the same 404 as no access, so existence never leaks; a storage failure is
-    a retryable 503, never that 404 (the site clears its selection on
-    platform_not_found). Callers must run this before touching anything of
-    the competition.
+    (entity, role, None) when `comp_id` names a live record the caller holds
+    `need` on, else (None, None, error response). An unknown or deleted
+    (hidden) record is the same 404 as no access, so existence never leaks; a
+    storage failure is a retryable 503, never that 404 (the site clears its
+    selection on platform_not_found). Callers must run this before touching
+    anything of the competition.
     """
     entity = None
     if comp_id and isinstance(comp_id, str):
@@ -264,14 +297,20 @@ def _competition_for(caller, comp_id, need):
             entity = _get_competition_entity_strict(comp_id)
         except Exception as e:
             logging.error(f"Could not read competition {comp_id}: {type(e).__name__}")
-            return None, func.HttpResponse("Temporarily unavailable, try again later", status_code=503,
-                                           headers={"Retry-After": "30"})
+            return None, None, func.HttpResponse("Temporarily unavailable, try again later", status_code=503,
+                                                 headers={"Retry-After": "30"})
     if not entity or entity.get("Visible") is False:
-        return None, func.HttpResponse(_ACCESS_NOT_FOUND, status_code=404)
-    error = _access_error(caller, entity.get("PlatformId"), need)
+        return None, None, func.HttpResponse(_ACCESS_NOT_FOUND, status_code=404)
+    role, error = _access_role(caller, entity.get("PlatformId"), need)
     if error is not None:
-        return None, error
-    return entity, None
+        return None, None, error
+    return entity, role, None
+
+
+def _competition_for(caller, comp_id, need):
+    """(entity, None) or (None, error response): _competition_role_for without the role."""
+    entity, _role, error = _competition_role_for(caller, comp_id, need)
+    return entity, error
 
 
 # Liveness for the site's admin diagnostics: no sign-in, no secret, no storage
@@ -1666,7 +1705,7 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Missing id parameter", status_code=400)
 
     try:
-        entity, denied = _competition_for(caller, comp_id, "read")
+        entity, role, denied = _competition_role_for(caller, comp_id, "read")
         if denied is not None:
             return denied
 
@@ -1979,6 +2018,9 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
             "alerts": alerts,
             "categories": list(detected_category_codes),
             "generatedFiles": generated_links,
+            # Live e-mailed / copied download links (_share_links); null when
+            # they could not be read.
+            "shareLinks": _share_links(comp_id, caller, role),
             # Names whose copy was just replaced by a newer one from the pool.
             "refreshedFromPool": refreshed,
             # The site UI has no competition list anymore; the auto-delete date
@@ -2205,11 +2247,132 @@ def _sends_in_last_day(sent_table, email):
 
 
 def _links_in_last_day(sent_table, oid):
-    """Number of links this user created in the last 24 h (any competition)."""
+    """Number of links this user created in the last 24 h (any competition).
+    E-mail rows carry SentByOid too, but they have their own limit."""
     since = _iso_utc(datetime.now(timezone.utc) - timedelta(days=1))
     rows = sent_table.query_entities(
-        f"SentByOid eq '{oid}' and SentDate ge '{since}'", select=["RowKey"])
-    return sum(1 for _ in rows)
+        f"SentByOid eq '{oid}' and SentDate ge '{since}'", select=["RowKey", "Channel"])
+    return sum(1 for row in rows if row.get("Channel") == LINK_CHANNEL)
+
+
+def _admin_override_only(caller, entity):
+    """
+    True when `caller` reaches this competition only through the router's
+    admin flag: an admin with no grant of their own (role_for with
+    is_admin=False finds none) or a record bound to no platform competition.
+    Raises PlatformAccessUnavailable when the access tables can't be read.
+    """
+    if not caller.is_admin:
+        return False
+    guid = normalize_platform_id(entity.get("PlatformId"))
+    if guid is None:
+        return True
+    own = platform_access.role_for(guid, caller.tid, caller.oid, is_admin=False)
+    return not (own and platform_access.role_satisfies(own, "read"))
+
+
+def _link_creator_columns(caller, admin_override):
+    """Who made a link: stored on every new sentemails row. tid + oid are
+    re-checked against the platform's grants on every download
+    (_link_creator_denied); SentByAdmin marks a link made through the admin
+    override alone (_admin_override_only). E-mail and name are for display."""
+    return {
+        "SentBy": caller.email,
+        "SentByName": caller.name or "",
+        "SentByTid": caller.tid,
+        "SentByOid": caller.oid,
+        "SentByAdmin": bool(admin_override),
+    }
+
+
+def _is_revoked(row):
+    """A revoked link keeps its row (the daily limits count it) but is dead."""
+    return bool(row.get("RevokedUtc"))
+
+
+def _created_by(row, caller):
+    """Was this sentemails row made by `caller`? By identity (oid, and tid when
+    stored — older link rows have only the oid), never by e-mail."""
+    oid = row.get("SentByOid")
+    if not oid or oid != caller.oid:
+        return False
+    tid = row.get("SentByTid")
+    return not tid or tid == caller.tid
+
+
+def _share_links(comp_id, caller, role):
+    """
+    The competition's live (unexpired, unrevoked) download links for
+    get_competition_details, newest first:
+    [{linkId, fileName, channel: "email"|"link", created, expiration,
+      downloadCount, lastDownloaded, createdByMe, createdBy, to?, cc?}].
+    write/owner (and admins) get every link plus the e-mail recipients
+    (`to`/`cc`, e-mail links only); a read-only caller gets only the links
+    they created, without recipients. Never a token. None when the table
+    can't be read.
+    """
+    sent_table = get_table_client("sentemails")
+    if not sent_table:
+        return None
+    can_see_all = platform_access.role_satisfies(role, "write")
+    safe_pk = comp_id.replace("'", "''")
+    try:
+        rows = list(sent_table.query_entities(f"PartitionKey eq '{safe_pk}'"))
+    except ResourceNotFoundError:
+        return []  # the table doesn't exist yet: nothing was ever shared
+    except Exception as e:
+        logging.warning(f"Could not read the download links of {comp_id}: {type(e).__name__}")
+        return None
+
+    now = datetime.now(timezone.utc)
+    links = []
+    for row in rows:
+        expiry = _parse_iso_utc(row.get("LinkExpiry"))
+        if not expiry or expiry <= now or _is_revoked(row):
+            continue
+        mine = _created_by(row, caller)
+        if not can_see_all and not mine:
+            continue
+        channel = LINK_CHANNEL if row.get("Channel") == LINK_CHANNEL else EMAIL_CHANNEL
+        item = {
+            "linkId": _link_id(row),
+            "fileName": row.get("FileName") or "",
+            "channel": channel,
+            "created": row.get("SentDate") or None,
+            "expiration": _iso_utc(expiry),
+            "downloadCount": int(row.get("DownloadCount") or 0),
+            "lastDownloaded": row.get("LastDownloaded") or None,
+            "createdByMe": mine,
+            "createdBy": row.get("SentByName") or row.get("SentBy") or None,
+        }
+        if can_see_all and channel == EMAIL_CHANNEL:
+            item["to"] = row.get("To") or ""
+            item["cc"] = row.get("Cc") or ""
+        links.append(item)
+    links.sort(key=lambda link: link["created"] or "", reverse=True)
+    return links
+
+
+def _find_link_row(sent_table, comp_id, link_id):
+    """The unrevoked sentemails row of competition `comp_id` whose public id
+    is `link_id` (a 64-char lowercase hex string), or None."""
+    try:
+        row = sent_table.get_entity(partition_key=comp_id, row_key=link_id)
+        if _is_hashed_link_row(row):
+            return None if _is_revoked(row) else row
+    except ResourceNotFoundError:
+        pass
+    # Legacy rows (RowKey = the clear token) are found by the hash of their
+    # RowKey. Remove together with download_judge_papers' legacy fallback
+    # after 2026-12-15.
+    safe_pk = comp_id.replace("'", "''")
+    try:
+        for row in sent_table.query_entities(f"PartitionKey eq '{safe_pk}'"):
+            if not _is_hashed_link_row(row) and hmac.compare_digest(_link_key(row["RowKey"]), link_id):
+                return None if _is_revoked(row) else row
+    except ResourceNotFoundError:
+        pass
+    return None
 
 
 def _link_expiry(entity, refusal):
@@ -2304,6 +2467,7 @@ def _parse_send_request(req: func.HttpRequest, require_recipients: bool):
         return None, error
 
     return {
+        "caller": caller,
         "email": email,
         "compId": comp_id,
         "entity": entity,
@@ -2365,6 +2529,11 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         if not blob_service_client.get_container_client(container_name).get_blob_client(blob_name).exists():
             return func.HttpResponse("Generated file not found", status_code=404)
 
+        try:
+            admin_override = _admin_override_only(ctx["caller"], ctx["entity"])
+        except PlatformAccessUnavailable:
+            return func.HttpResponse(_ACCESS_UNAVAILABLE, status_code=503)
+
         sent_table = get_table_client("sentemails")
         if not sent_table:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
@@ -2373,14 +2542,18 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         except Exception:
             pass
 
-        # The audit row doubles as the download link: its RowKey is the token
-        # download_judge_papers resolves, so it is written before sending.
+        # The audit row doubles as the download link: its RowKey is the hash
+        # of the token download_judge_papers resolves (the token itself is
+        # stored nowhere), so it is written before sending.
         token = secrets.token_urlsafe(24)
+        key = _link_key(token)
         url = _public_download_url(token)
         sent_table.create_entity({
             "PartitionKey": comp_id,
-            "RowKey": token,
-            "SentBy": email,
+            "RowKey": key,
+            LINK_KEY_KIND_COLUMN: LINK_KEY_KIND_SHA256,
+            "Channel": EMAIL_CHANNEL,
+            **_link_creator_columns(ctx["caller"], admin_override),
             "To": to,
             "Cc": results_service_email,
             "FileName": file_name,
@@ -2401,7 +2574,7 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
             over_limit = None
         if over_limit is not False:
             try:
-                sent_table.delete_entity(partition_key=comp_id, row_key=token)
+                sent_table.delete_entity(partition_key=comp_id, row_key=key)
             except Exception as de:
                 logging.warning(f"Failed to remove the refused e-mail's link row: {de}")
             if over_limit is None:
@@ -2417,7 +2590,7 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         except email_sender.EmailSendError as e:
             logging.error(f"Judges' papers e-mail for {comp_id} failed: {e}")
             try:
-                sent_table.delete_entity(partition_key=comp_id, row_key=token)
+                sent_table.delete_entity(partition_key=comp_id, row_key=key)
             except Exception as de:
                 logging.warning(f"Failed to remove the unsent e-mail's link row: {de}")
             return func.HttpResponse("The e-mail service rejected the message, try again later", status_code=502)
@@ -2431,7 +2604,7 @@ def send_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         try:
             sent_table.update_entity({
                 "PartitionKey": comp_id,
-                "RowKey": token,
+                "RowKey": key,
                 "MailgunId": result["id"] or "",
                 "DryRun": result["dryRun"],
             }, mode=UpdateMode.MERGE)
@@ -2513,6 +2686,11 @@ def create_download_link(req: func.HttpRequest) -> func.HttpResponse:
         if not blob_service_client.get_container_client(GENERATED_CONTAINER).get_blob_client(blob_name).exists():
             return func.HttpResponse("Generated file not found", status_code=404)
 
+        try:
+            admin_override = _admin_override_only(caller, entity)
+        except PlatformAccessUnavailable:
+            return func.HttpResponse(_ACCESS_UNAVAILABLE, status_code=503)
+
         sent_table = get_table_client("sentemails")
         if not sent_table:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
@@ -2521,13 +2699,15 @@ def create_download_link(req: func.HttpRequest) -> func.HttpResponse:
         except Exception:
             pass
 
+        # Only the hash of the token is stored (see send_judge_papers).
         token = secrets.token_urlsafe(24)
+        key = _link_key(token)
         sent_table.create_entity({
             "PartitionKey": comp_id,
-            "RowKey": token,
+            "RowKey": key,
+            LINK_KEY_KIND_COLUMN: LINK_KEY_KIND_SHA256,
             "Channel": LINK_CHANNEL,
-            "SentBy": caller.email,
-            "SentByOid": caller.oid,
+            **_link_creator_columns(caller, admin_override),
             "To": "",
             "Cc": "",
             "FileName": file_name,
@@ -2546,7 +2726,7 @@ def create_download_link(req: func.HttpRequest) -> func.HttpResponse:
             over_limit = None
         if over_limit is not False:
             try:
-                sent_table.delete_entity(partition_key=comp_id, row_key=token)
+                sent_table.delete_entity(partition_key=comp_id, row_key=key)
             except Exception as de:
                 logging.warning(f"Failed to remove the refused link's row: {de}")
             if over_limit is None:
@@ -2566,6 +2746,76 @@ def create_download_link(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Internal server error", status_code=500)
 
 
+_LINK_NOT_FOUND = "link_not_found: no such link, or it has already been revoked"
+
+
+@app.route(route="revoke_download_link", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def revoke_download_link(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Revoke an e-mailed or copied download link. Body {id, linkId} (linkId from
+    get_competition_details' shareLinks) -> {"status": "revoked", "linkId"}.
+    write/owner (and admins) may revoke any link of the competition, a
+    read-only caller only a link they created (else 403 platform_read_only).
+    The sentemails row is kept and marked (RevokedUtc, RevokedByTid/Oid): the
+    link then answers 410, it leaves shareLinks, and it still counts toward
+    the daily e-mail and link limits (deleting it would let send + revoke
+    get around them). The row goes with the competition like the others. An
+    unknown or already revoked link is 404 link_not_found.
+    """
+    if req.method.upper() != "POST":
+        return func.HttpResponse("Method not allowed", status_code=405, headers={"Allow": "POST"})
+
+    caller = get_caller(req)
+    if not caller:
+        return func.HttpResponse("Unauthorized", status_code=401)
+    if not is_user_allowed(caller):
+        return func.HttpResponse("Forbidden", status_code=403)
+
+    try:
+        req_body = req.get_json()
+    except ValueError:
+        req_body = None
+    if not isinstance(req_body, dict):
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    comp_id = req_body.get("id")
+    link_id = req_body.get("linkId")
+    if not comp_id or not isinstance(comp_id, str):
+        return func.HttpResponse("Missing id parameter", status_code=400)
+    if not isinstance(link_id, str) or not LINK_ID_RE.fullmatch(link_id):
+        return func.HttpResponse("Invalid linkId", status_code=400)
+
+    try:
+        _entity, role, denied = _competition_role_for(caller, comp_id, "read")
+        if denied is not None:
+            return denied
+
+        sent_table = get_table_client("sentemails")
+        if not sent_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+        row = _find_link_row(sent_table, comp_id, link_id)
+        if row is None:
+            return func.HttpResponse(_LINK_NOT_FOUND, status_code=404)
+        if not platform_access.role_satisfies(role, "write") and not _created_by(row, caller):
+            return func.HttpResponse(_ACCESS_READ_ONLY, status_code=403)
+        try:
+            sent_table.update_entity({
+                "PartitionKey": row["PartitionKey"],
+                "RowKey": row["RowKey"],
+                "RevokedUtc": _iso_utc(datetime.now(timezone.utc)),
+                "RevokedByTid": caller.tid,
+                "RevokedByOid": caller.oid,
+            }, mode=UpdateMode.MERGE)
+        except ResourceNotFoundError:
+            return func.HttpResponse(_LINK_NOT_FOUND, status_code=404)
+
+        logging.info(f"Revoked a download link in {comp_id}")
+        return func.HttpResponse(json.dumps({"status": "revoked", "linkId": link_id}),
+                                 mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Error revoking a judges' papers download link: {e}", exc_info=True)
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
 _DOWNLOAD_NOT_FOUND = ("Linkkiä ei löydy tai tiedosto on poistettu.\n"
                        "This link is invalid or the file has been removed.\n")
 _DOWNLOAD_EXPIRED = ("Linkki on vanhentunut. Pyydä lähettäjältä uusi linkki.\n"
@@ -2579,13 +2829,63 @@ def _download_error(message, status_code):
                              charset="utf-8", headers={"Cache-Control": "no-store"})
 
 
+def _download_link_row(sent_table, token):
+    """The sentemails row of a format-checked download token, or None.
+    Cross-partition scans, fine at a few dozen rows a year; the token is
+    regex-checked and its hash is hex, so neither can break out of the filter."""
+    key = _link_key(token)
+    for row in sent_table.query_entities(f"RowKey eq '{key}'"):
+        if _is_hashed_link_row(row):
+            return row
+    # Legacy fallback: rows written before the hashing hold the token itself
+    # as RowKey. Only a row WITHOUT the KeyKind marker is accepted, so a stored
+    # hash can never be presented as a token. Those links lived at most 5
+    # days: remove this fallback (and _find_link_row's) after 2026-12-15.
+    for row in sent_table.query_entities(f"RowKey eq '{token}'"):
+        if not _is_hashed_link_row(row):
+            return row
+    return None
+
+
+def _link_creator_denied(row, entity):
+    """
+    None when the link's creator may still read the competition, else the
+    response: the expired-link 410 when they no longer can (access removed),
+    a retryable 503 when the platform's access tables can't be read (never a
+    410). Rows without a stored creator identity (older ones) and records not
+    bound to a platform competition skip the check.
+
+    Known limitation: a link an admin made through the admin override alone
+    (SentByAdmin, no grant of their own) skips the check too. Admin status
+    lives only in the sign-in token, never in a table this app can read, so
+    it can't be re-checked here. Such links are listed in shareLinks and the
+    owner and writers can revoke them; an admin who also holds a grant gets
+    an ordinary row, checked like anyone else's.
+    """
+    tid, oid = row.get("SentByTid"), row.get("SentByOid")
+    guid = normalize_platform_id(entity.get("PlatformId"))
+    if not tid or not oid or guid is None or row.get("SentByAdmin") is True:
+        return None
+    try:
+        role = platform_access.role_for(guid, tid, oid, is_admin=False)
+    except PlatformAccessUnavailable:
+        logging.error(f"Download link: platform access unavailable for platform competition {guid}")
+        return func.HttpResponse("Temporarily unavailable, try again later", status_code=503,
+                                 headers={"Cache-Control": "no-store", "Retry-After": "60"})
+    if role is None or not platform_access.role_satisfies(role, "read"):
+        return _download_error(_DOWNLOAD_EXPIRED, 410)
+    return None
+
+
 @app.route(route="download_judge_papers", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET", "HEAD"])
 def download_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Resolve an e-mailed or copied download link (?t=<token>, the sentemails
-    RowKey written by send_judge_papers or create_download_link) to a
-    short-lived read SAS and redirect there. The recipient isn't signed in, so
-    this is the one route with no user header — the proxy secret still applies.
+    Resolve an e-mailed or copied download link (?t=<token>; the sentemails
+    row written by send_judge_papers or create_download_link, keyed by the
+    token's sha256) to a short-lived read SAS and redirect there. The
+    recipient isn't signed in, so this is the one route with no user header —
+    the proxy secret still applies. The link works only while its creator can
+    still read the competition (_link_creator_denied).
     """
     if not _proxy_secret_ok(req):
         return func.HttpResponse("Unauthorized", status_code=401)
@@ -2598,10 +2898,9 @@ def download_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         sent_table = get_table_client("sentemails")
         if not sent_table:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
-        # Cross-partition scan, fine at a few dozen rows a year. The token is
-        # regex-checked above, so it can't break out of the filter string.
-        row = next(iter(sent_table.query_entities(f"RowKey eq '{token}'")), None)
-        if not row:
+        row = _download_link_row(sent_table, token)
+        if not row or _is_revoked(row):
+            # A revoked link answers like one whose row is gone.
             # A well-formed token with no row is almost always a link whose
             # competition was deleted (its sentemails rows go with it): 410.
             return _download_error(_DOWNLOAD_NOT_FOUND, 410)
@@ -2623,6 +2922,10 @@ def download_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         if not entity or entity.get("Visible") is False:
             return _download_error(_DOWNLOAD_GONE, 410)
 
+        denied = _link_creator_denied(row, entity)
+        if denied is not None:
+            return denied
+
         blob_service_client = get_blob_service_client()
         if not blob_service_client:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
@@ -2643,12 +2946,12 @@ def download_judge_papers(req: func.HttpRequest) -> func.HttpResponse:
         try:
             sent_table.update_entity({
                 "PartitionKey": comp_id,
-                "RowKey": token,
+                "RowKey": row["RowKey"],
                 "DownloadCount": int(row.get("DownloadCount") or 0) + 1,
                 "LastDownloaded": _iso_utc(now),
             }, mode=UpdateMode.MERGE)
         except Exception as e:
-            logging.warning(f"Failed to count the download of {token[:6]}…: {e}")
+            logging.warning(f"Failed to count a download in {comp_id}: {type(e).__name__}")
 
         return func.HttpResponse(status_code=302, headers={
             "Location": url,
