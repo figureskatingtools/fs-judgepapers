@@ -2875,15 +2875,6 @@ def _link_creator_denied(row, entity):
     if role is None or not platform_access.role_satisfies(role, "read"):
         return _download_error(_DOWNLOAD_EXPIRED, 410)
     return None
-    try:
-        role = platform_access.role_for(guid, tid, oid, is_admin=row.get("SentByAdmin") is True)
-    except PlatformAccessUnavailable:
-        logging.error(f"Download link: platform access unavailable for platform competition {guid}")
-        return func.HttpResponse("Temporarily unavailable, try again later", status_code=503,
-                                 headers={"Cache-Control": "no-store", "Retry-After": "60"})
-    if role is None or not platform_access.role_satisfies(role, "read"):
-        return _download_error(_DOWNLOAD_EXPIRED, 410)
-    return None
 
 
 @app.route(route="download_judge_papers", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET", "HEAD"])
