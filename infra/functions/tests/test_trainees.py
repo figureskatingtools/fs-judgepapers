@@ -232,7 +232,7 @@ def test_parse_refuses_a_segment_with_outer_spaces(segment):
 
 @pytest.mark.parametrize("first, second", [
     ("Anna-Maria Xu", "Annamaria Xu"),        # both annamaria_xu
-    ("Ann Lee", "Ann Lée"),                   # both ann_lee
+    ("O'Neil Lee", "ONeil Lee"),              # both oneil_lee
 ])
 def test_parse_refuses_two_names_that_would_share_a_packet(first, second):
     assert tr.trainee_slug(first) == tr.trainee_slug(second)
@@ -244,12 +244,35 @@ def test_parse_refuses_two_names_that_would_share_a_packet(first, second):
 
 
 def test_parse_accepts_the_same_person_in_two_roles_whatever_the_case_or_spacing():
-    raw = [trainee("Ann Lee"), trainee("ANN  lee", "technical", [SEG_B]),
+    raw = [trainee("Ann Lee"), trainee("ANN  lee", "technical", [SEG_B]), trainee("Ann Lée", segments=[SEG_B]),
            trainee("Иван Петров"), trainee("иван петров", "technical")]
 
     clean, error = tr.parse_trainees(raw)
 
-    assert error is None and len(clean) == 4
+    assert error is None and len(clean) == 5
+
+
+@pytest.mark.parametrize("a, b, same", [
+    ("Nina Gustafsson", "Nina GUSTAFSSON", True),          # case
+    ("Vaino Akerstrom", "Väinö ÅKERSTRÖM", True),          # diacritics
+    ("  Väinö   Åkerström ", unicodedata.normalize("NFD", NAME), True),   # spacing, Unicode form
+    ("Pётр Иванов", "Pетр Иванов", True),
+    ("Annamaria Xu", "Anna-Maria Xu", False),              # same slug, another person
+    ("O'Neil Lee", "ONeil Lee", False),
+    ("Ann Lee", "Anne Lee", False),
+])
+def test_same_person_differs_only_in_case_spacing_and_diacritics(a, b, same):
+    assert tr.same_person(a, b) is same
+    assert (tr.person_key(a) == tr.person_key(b)) is same
+
+
+def test_separate_slug_is_never_a_slugify_result_or_a_trainee_slug():
+    slug = tr.separate_slug("annamaria_xu")
+
+    assert slug == "annamaria_xu-trainee"
+    assert "-" not in tr.slugify(slug)
+    assert not slug.startswith("trainee-")
+    assert tr.separate_slug(tr.trainee_slug("Иван Петров")).endswith("-trainee")
 
 
 def test_the_numbered_fallback_no_longer_collides_with_a_real_name():

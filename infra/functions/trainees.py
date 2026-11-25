@@ -87,9 +87,23 @@ def _clean_name(raw):
     return name
 
 
-def _name_key(name):
-    """One person's spelling, whatever the case, spacing or Unicode form."""
-    return unicodedata.normalize("NFC", " ".join(name.split())).casefold()
+def person_key(name):
+    """
+    The key under which two spellings are one person: NFKD with the combining
+    marks dropped, casefolded, whitespace collapsed. So only case, spacing
+    and diacritics may differ: `Nina Gustafsson` is FSM's `Nina GUSTAFSSON`,
+    `Vaino Akerstrom` is `Väinö ÅKERSTRÖM`; `Annamaria Xu` is not
+    `Anna-Maria Xu`. The one definition of "the same person" for trainees:
+    between two entries, and between a trainee and a panel member.
+    """
+    decomposed = unicodedata.normalize("NFKD", name if isinstance(name, str) else "")
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return " ".join(stripped.casefold().split())
+
+
+def same_person(a, b):
+    """Whether two names are one person's spellings (person_key)."""
+    return person_key(a) == person_key(b)
 
 
 def _valid_segment(value):
@@ -117,7 +131,7 @@ def parse_trainees(raw):
         return None, f"at most {MAX_TRAINEES} trainees"
 
     clean = []
-    slugs = {}  # slug -> (position, name key) of the first entry with it
+    slugs = {}  # slug -> (position, person_key) of the first entry with it
     for position, entry in enumerate(raw, start=1):
         where = f"trainee {position}"
         if not isinstance(entry, dict) or set(entry) != TRAINEE_KEYS:
@@ -134,7 +148,7 @@ def parse_trainees(raw):
         # One packet per slug: two people whose names slugify alike would share
         # one packet under the first one's name. The same name in two roles
         # (one person) is fine.
-        key = _name_key(name)
+        key = person_key(name)
         first_position, first_key = slugs.setdefault(trainee_slug(name), (position, key))
         if first_key != key:
             return None, (f"{where}: name is too close to trainee {first_position}'s (they would "
@@ -166,7 +180,7 @@ def sanitize_trainees(raw):
     if not isinstance(raw, list):
         return []
     clean = []
-    slugs = {}  # slug -> name key of the first entry kept with it
+    slugs = {}  # slug -> person_key of the first entry kept with it
     for entry in raw:
         if len(clean) >= MAX_TRAINEES:
             break
@@ -179,7 +193,7 @@ def sanitize_trainees(raw):
         role = entry.get("role")
         if name is None or not isinstance(role, str) or role not in TRAINEE_ROLES:
             continue
-        key = _name_key(name)
+        key = person_key(name)
         if slugs.setdefault(trainee_slug(name), key) != key:
             continue
         segments = entry.get("segments")
@@ -192,15 +206,31 @@ def sanitize_trainees(raw):
 
 def trainee_slug(name):
     """
-    The file-name slug of a trainee: slugify(name) as for the panel's
-    officials (so the same person on a panel shares one packet). A name with
-    no a-z/0-9 character left after slugify (all-Cyrillic, all-Š) gets
-    trainee-<the first 8 hex digits of sha1 of its _name_key>: the same for
-    the same name in two entries, and never a slugify result (so never a
-    panel member's slug), since slugify keeps no "-".
+    The file-name slug of a trainee's own packet: slugify(name) as for the
+    panel's officials. A name with no a-z/0-9 character left after slugify
+    (all-Cyrillic, all-Š) gets trainee-<the first 8 hex digits of sha1 of
+    its person_key>: the same for the same person in two entries, and never
+    a slugify result (so never a panel member's slug), since slugify keeps
+    no "-". Whether a trainee joins a panel member's packet is decided by
+    person_key, never by slug (processor.add_trainee_tasks); a trainee whose
+    slug a different panel member holds gets separate_slug(slug).
     """
     name = name if isinstance(name, str) else ""
     slug = slugify(name)
     if not re.search(r"[a-z0-9]", slug):
-        return "trainee-" + hashlib.sha1(_name_key(name).encode("utf-8")).hexdigest()[:8]
+        return "trainee-" + hashlib.sha1(person_key(name).encode("utf-8")).hexdigest()[:8]
     return slug
+
+
+SEPARATE_SLUG_SUFFIX = "-trainee"
+
+
+def separate_slug(slug):
+    """
+    The packet slug of a trainee whose own slug a different person on a
+    panel holds (Annamaria Xu vs FSM's Anna-Maria XU): slugify never makes a
+    "-", so no panel member has it; trainee_slug's hashed form starts with
+    "trainee-" and ends in hex digits, and two different trainees never share
+    a slug (parse_trainees / sanitize_trainees), so no trainee has it either.
+    """
+    return slug + SEPARATE_SLUG_SUFFIX

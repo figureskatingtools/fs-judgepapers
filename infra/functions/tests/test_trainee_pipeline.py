@@ -150,6 +150,32 @@ def test_the_day_document_counts_the_trainee(competition, capsys):
     assert "check block says" not in capsys.readouterr().out
 
 
+def test_an_unreadable_ts_sheet_costs_the_trainee_that_segment_only(competition, capsys):
+    """JUN has no Technical Specialist on its panel, so no official's packet reads its
+    TS sheet: a broken one used to fail the whole run in the withdrawn-page filter."""
+    src, out = competition
+    (src / f"{JUN}_TechnicalSpecialistSheet1.pdf").write_bytes(b"%PDF-1.4 this is not a pdf at all")
+    trainees = [{"name": TRAINEE, "role": "judge", "segments": [JUN]},
+                {"name": TRAINEE, "role": "technical", "segments": [JUN]}]
+
+    stats = processor.process_judging_papers(str(src), str(out), {"trainees": trainees})
+
+    assert stats["trainee_segments_without_sheets"] == 1
+    assert stats["trainee_sheets_unstamped"] == 0
+    with zipfile.ZipFile(out / f"judgingPapers_{DATE}.zip") as zf:
+        assert sorted(zf.namelist()) == [f"judgingpapers_{DATE}_{slug}.pdf" for slug in
+                                         (SLUG, "jane_second", "jon_judge", "rea_referee", "tia_specialist")]
+    pages = [collapse(t) for t in pages_text(packet(out, SLUG))]
+    # cover, time schedule + Judge No. 1's two stamped pages, time schedule (no TS sheet)
+    assert len(pages) == 5
+    assert sum("Judge Trainee" in page and TRAINEE in page for page in pages[1:]) == 2
+    assert not any("Technical Trainee:" in page for page in pages)
+    # The specialist on SEN still gets her own sheets
+    assert any("Technical Specialist:" in collapse(t) for t in pages_text(packet(out, "tia_specialist")))
+    logs = capsys.readouterr().out
+    assert "can't be read" in logs and TRAINEE not in logs and SLUG not in logs
+
+
 def test_without_trainees_nothing_changes(competition):
     src, out = competition
 

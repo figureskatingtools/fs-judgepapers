@@ -14,7 +14,7 @@ try:
     from .categories import load_categories, match_category, parse_filename_generic, effective_judging_method, names_from_sheet_line
     from .competition_schedule import parse_competition_schedule, get_schedule_start_time
     from .combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
-    from .trainees import TRAINEE_TASKS, sanitize_trainees, trainee_slug
+    from .trainees import TRAINEE_TASKS, person_key, sanitize_trainees, separate_slug, trainee_slug
     from .trainee_sheets import stamp_trainee_sheet
 except ImportError:
     # Fallback for local testing if not running as package
@@ -24,7 +24,7 @@ except ImportError:
     from categories import load_categories, match_category, parse_filename_generic, effective_judging_method, names_from_sheet_line
     from competition_schedule import parse_competition_schedule, get_schedule_start_time
     from combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
-    from trainees import TRAINEE_TASKS, sanitize_trainees, trainee_slug
+    from trainees import TRAINEE_TASKS, person_key, sanitize_trainees, separate_slug, trainee_slug
     from trainee_sheets import stamp_trainee_sheet
 
 
@@ -317,30 +317,61 @@ def add_trainee_tasks(person_tasks, trainees, segment_panels):
     Add the trainees' tasks to person_tasks (step 2). segment_panels:
     {prefix: {'date', 'title', 'judges'}} for every segment that got a panel
     and a start list; a trainee's other segments (not among the current
-    files, e.g. after a re-import) are ignored. A trainee whose slug already
-    has a packet that day (a panel member of the same name) joins it: one
-    packet per person, the panel's spelling of the name stays.
+    files, e.g. after a re-import) are ignored.
+
+    One packet per person, and "the same person" is trainees.person_key
+    (case, spacing and diacritics may differ), never an equal slug:
+      * entries of one person (e.g. both roles) are one trainee, under the
+        first entry's name and slug;
+      * on a day where a panel member is the same person, the trainee joins
+        that member's packet (the panel's spelling of the name stays);
+      * otherwise the trainee has a packet of their own, under their typed
+        name. Its slug is trainee_slug(name), or separate_slug of it when a
+        different panel member holds that slug on any day the trainee has a
+        packet of their own: decided once, so the packets are named alike on
+        every day. Different people never share a packet, so step 2.5's
+        conflict rule only ever meets the same person.
     Returns the number of trainee tasks added.
     """
-    added = 0
+    # The panels only, before any trainee is added: date -> {slug: name}
+    panel_names = {date: {slug: data['name'] for slug, data in persons.items()}
+                   for date, persons in person_tasks.items()}
+
+    people = {}  # person_key -> {'name', 'slug', 'tasks': [(prefix, task role, label)]}
     for trainee in trainees:
         task_role, label = TRAINEE_TASKS[trainee['role']]
-        slug = trainee_slug(trainee['name'])
+        person = people.setdefault(person_key(trainee['name']), {
+            'name': trainee['name'], 'slug': trainee_slug(trainee['name']), 'tasks': []})
         for prefix in trainee['segments']:
-            segment = segment_panels.get(prefix)
-            if segment is None:
-                continue
+            task = (prefix, task_role, label)
+            # a segment without a panel and a start list is ignored; the same
+            # trainee listed twice for a segment adds one task
+            if prefix in segment_panels and task not in person['tasks']:
+                person['tasks'].append(task)
+
+    added = 0
+    for key, person in people.items():
+        days = {segment_panels[prefix]['date'] for prefix, _, _ in person['tasks']}
+        joined, clash = {}, False
+        for date in days:
+            panel = panel_names.get(date, {})
+            joined[date] = next((slug for slug, name in panel.items() if person_key(name) == key), None)
+            if joined[date] is None and person['slug'] in panel:
+                clash = True    # a different person on that day's panels has the slug
+        own_slug = separate_slug(person['slug']) if clash else person['slug']
+
+        for prefix, task_role, label in person['tasks']:
+            segment = segment_panels[prefix]
+            slug = joined[segment['date']] or own_slug
             persons = person_tasks.setdefault(segment['date'], {})
             if slug not in persons:
                 persons[slug] = {
-                    'name': trainee['name'],
+                    'name': person['name'],
                     'title': segment['title'],
                     'tasks': [],
                     'role_labels': {},
                 }
             data = persons[slug]
-            if (prefix, task_role) in data['tasks']:
-                continue  # the same trainee listed twice for the segment
             data['tasks'].append((prefix, task_role))
             data['role_labels'][(prefix, task_role)] = label
             added += 1
@@ -856,11 +887,22 @@ def process_judging_papers(source_dir, output_dir, options=None):
                     if is_pattern_dance(prefix_segment_names.get(prefix)):
                         sheets.reverse()
                     sheet = next((s for s in sheets if os.path.exists(f"{base_path}_{s}.pdf")), None)
+                    base = None
                     if sheet:
+                        # An unreadable sheet fails the withdrawn-page filter
+                        # already: for a trainee that is a segment without a
+                        # sheet, never a failed run (a PD trainee may fall back
+                        # to a TS 1 sheet no official's packet ever reads)
+                        try:
+                            base = sheet_without_withdrawn(base_path, sheet)
+                        except Exception as e:
+                            print(f"  Warning: a Technical Specialist's sheet for a technical trainee "
+                                  f"in {prefix} can't be read ({type(e).__name__})")
+                            add_trainee_sheet(file_list, None)
+                    if base:
                         add_trainee_sheet(file_list, trainee_sheet(
-                            sheet_without_withdrawn(base_path, sheet),
-                            f"{base_path}_{sheet}_trainee_{slug}.pdf", "technical", data['name']))
-                    else:
+                            base, f"{base_path}_{sheet}_trainee_{slug}.pdf", "technical", data['name']))
+                    elif not sheet:
                         add_trainee_sheet(file_list, None)
                         print(f"  Warning: no Technical Specialist's sheets to copy for a technical trainee in {prefix}")
 

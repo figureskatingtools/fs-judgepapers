@@ -77,7 +77,7 @@ def run(tmp_path, monkeypatch):
     """
     count = [0]
 
-    def _run(options, panels=None, missing=(), stamp=None, prepare=None):
+    def _run(options, panels=None, missing=(), stamp=None, prepare=None, dates=None):
         count[0] += 1
         src = tmp_path / f"src{count[0]}"
         src.mkdir()
@@ -124,7 +124,8 @@ def run(tmp_path, monkeypatch):
         monkeypatch.setattr(processor, "extract_segment_name_from_pdf", lambda path: LINES[prefix_of(path)])
         monkeypatch.setattr(processor, "extract_title_from_pdf", lambda path: "Competition")
         monkeypatch.setattr(processor, "create_cover_pdf", cover)
-        monkeypatch.setattr(processor, "get_date_from_start_list", lambda path: DATE)
+        monkeypatch.setattr(processor, "get_date_from_start_list",
+                            lambda path: (dates or {}).get(prefix_of(path), DATE))
         monkeypatch.setattr(processor, "get_first_start_time_from_start_list",
                             lambda path: TIMES[prefix_of(path)])
         monkeypatch.setattr(processor, "get_last_end_time_from_start_list", lambda path: None)
@@ -261,6 +262,75 @@ def test_a_trainee_task_is_dropped_where_the_person_holds_those_sheets(run, trai
     assert r.stamps == []
     assert all(role != "Judge Trainee" and role != "Technical Trainee" for _, _, role in r.covers[slug][2])
     assert r.stats["trainee_assignment_count"] == 0
+
+
+LOOKALIKE = ("judge", "Anna-Maria XU", "Judge 3")    # slugifies like the trainee Annamaria Xu
+OTHER = "Annamaria Xu"
+OWN = "annamaria_xu-trainee"
+
+
+def test_a_lookalike_panel_member_on_the_trainees_segment_is_another_person(run, capsys):
+    r = run({"trainees": [judge(OTHER, [FD])]}, panels={PD: PANEL, FD: PANEL + [LOOKALIKE]})
+
+    # The panel member's packet is theirs alone, unchanged
+    assert r.packet("annamaria_xu") == [cover_name("annamaria_xu"), f"{FD}_StartListwithTimes.pdf",
+                                        f"{FD}_JudgesSheetAll_judge_annamaria_xu.pdf"]
+    assert r.covers["annamaria_xu"][0] == "Anna-Maria XU"
+    # The trainee keeps the task (no conflict: another person judges) in a packet of their own
+    assert r.packet(OWN) == [cover_name(OWN), f"{FD}_StartListwithTimes.pdf",
+                             f"{FD}_JudgesSheetAll_trainee_{OWN}.pdf"]
+    assert r.covers[OWN][0] == OTHER and r.covers[OWN][2][0][2] == "Judge Trainee"
+    assert r.stamps == [(f"{FD}_JudgesSheetAll_judge_jon_judge.pdf", f"{FD}_JudgesSheetAll_trainee_{OWN}.pdf",
+                         "judge", OTHER)]
+    assert r.stats["trainee_assignment_count"] == 1 and r.stats["trainee_count"] == 1
+    out = capsys.readouterr().out
+    assert "annamaria" not in out.lower()
+
+
+def test_a_lookalike_panel_member_on_another_segment_is_another_person(run):
+    r = run({"trainees": [technical(OTHER, [FD])]}, panels={PD: PANEL + [LOOKALIKE], FD: PANEL})
+
+    assert r.packet("annamaria_xu") == [cover_name("annamaria_xu"), f"{PD}_StartListwithTimes.pdf",
+                                        f"{PD}_JudgesSheetAll_judge_annamaria_xu.pdf"]
+    assert r.packet(OWN) == [cover_name(OWN), f"{FD}_StartListwithTimes.pdf",
+                             f"{FD}_TechnicalSpecialistSheet1_trainee_{OWN}.pdf"]
+    assert r.stamps[0][3] == OTHER
+
+
+def test_the_separate_slug_is_the_same_on_every_day(run):
+    day2 = "20261108"
+    # The look-alike is on the panel of day 1 only; the trainee has a segment on both days
+    r = run({"trainees": [judge(OTHER, [PD, FD])]}, panels={PD: PANEL + [LOOKALIKE], FD: PANEL},
+            dates={FD: day2})
+
+    assert f"judgingpapers_{DATE}_{OWN}.pdf" in r.packets
+    assert f"judgingpapers_{day2}_{OWN}.pdf" in r.packets
+    assert f"judgingpapers_{day2}_annamaria_xu.pdf" not in r.packets
+    assert r.packets[f"judgingpapers_{day2}_{OWN}.pdf"][-1] == f"{FD}_JudgesSheetAll_trainee_{OWN}.pdf"
+
+
+@pytest.mark.parametrize("panel_name, typed", [
+    ("Nina GUSTAFSSON", "nina  gustafsson"),          # case and spacing only
+    ("Väinö ÅKERSTRÖM", "Vaino Akerstrom"),          # diacritics only
+])
+def test_case_and_diacritics_only_still_share_one_packet(run, panel_name, typed):
+    slug = processor.slugify(panel_name)
+    panel = PANEL + [("data_operator", panel_name, "Data Operator")]
+
+    r = run({"trainees": [judge(typed, [FD])]}, panels={PD: PANEL, FD: panel})
+
+    assert r.packet(slug)[-2:] == [f"{FD}_StartListwithTimes.pdf", f"{FD}_JudgesSheetAll_trainee_{slug}.pdf"]
+    assert not any(name.endswith("-trainee.pdf") for name in r.packets)
+    assert r.covers[slug][0] == panel_name and r.stamps[0][3] == panel_name
+
+
+def test_the_same_person_with_other_diacritics_still_drops_a_covered_task(run):
+    # Väinö judges the FD; typed without diacritics he is still the same person
+    panel = [role for role in PANEL if role[0] != "judge"] + [("judge", "Väinö ÅKERSTRÖM", "Judge 1")]
+
+    r = run({"trainees": [judge("Vaino Akerstrom", [FD])]}, panels={PD: PANEL, FD: panel})
+
+    assert r.stamps == [] and r.stats["trainee_assignment_count"] == 0
 
 
 def test_other_trainee_roles_on_ones_own_segment_are_kept(run):

@@ -198,8 +198,8 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
   1–100 characters without leading or trailing spaces, `/`, `\` or control
   characters), stored normalized (Unicode NFC, whitespace collapsed,
   duplicate segments dropped). Two entries whose names would give one
-  packet file name must be the same name (ignoring case and spacing): the
-  same person in two roles. Otherwise 400 `trainee N: name is too close to
+  packet file name must be the same person (only case, spacing and
+  diacritics may differ), e.g. one person in two roles. Otherwise 400 `trainee N: name is too close to
   trainee M's (they would share one packet); use the same spelling for the
   same person`.
   The save is a read-modify-write of `metadata.json` with optimistic
