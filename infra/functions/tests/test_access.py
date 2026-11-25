@@ -93,7 +93,7 @@ ROUTES = {
             "POST", body={"platformId": PLATFORM_ID, "name": "Spring Cup"}, **kw))),
     "save_competition_settings": ("write", lambda **kw: call(
         fa.save_competition_settings, make_request(
-            "POST", body={"id": COMP_ID, "settings": {"language": "en"}}, **kw))),
+            "POST", body={"id": COMP_ID, "settings": {"judgingMethodOverrides": {}}}, **kw))),
     "generate_judging_papers": ("write", lambda **kw: call(
         fa.generate_judging_papers, make_request(
             "POST", body={"workingFolder": COMP_ID, "options": {}}, **kw))),

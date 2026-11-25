@@ -31,6 +31,7 @@ from categories import (
 )
 from competition_schedule import parse_competition_schedule, get_schedule_start_time
 import email_sender
+from trainees import parse_trainees, sanitize_trainees
 from platform_clock import (
     PlatformClockUnavailable,
     effective_deletion,
@@ -135,6 +136,12 @@ def _link_id(row):
     return key if _is_hashed_link_row(row) else _link_key(key)
 
 GENERATED_SUBFOLDER = "judgePapers"
+# A record's own bookkeeping files in its folder root, never competition files:
+# metadata.json holds the settings (overrides, trainees) and createdBy.
+RECORD_CONTROL_FILES = ("metadata.json", "init.md")
+# The keys save_competition_settings stores in metadata.json. Anything else is
+# refused: the body could otherwise overwrite id, name or createdBy.
+SETTINGS_KEYS = ("judgingMethodOverrides", "trainees")
 
 
 def _record_file_name(filename):
@@ -447,7 +454,7 @@ def _refresh_from_pool(entity, container, folder_path):
             name = blob.name[len(prefix):]
             if not name or '/' in name:
                 continue
-            if name in ("metadata.json", "init.md"):
+            if name in RECORD_CONTROL_FILES:
                 continue
             if not name.lower().endswith(".pdf"):
                 continue
@@ -771,6 +778,8 @@ def _store_competition_statistics(comp_id, stats):
             "judging_method": ("JudgingMethod", False),
             "combined_schedule": ("CombinedSchedule", False),
             "combined_schedule_copies": ("CombinedScheduleCopies", False),
+            "trainee_count": ("TraineeCount", False),
+            "trainee_assignment_count": ("TraineeAssignmentCount", False),
         }
         for key, (column, as_json) in column_map.items():
             value = stats.get(key)
@@ -1675,6 +1684,33 @@ def _read_competition_metadata(container, folder_path):
         logging.warning(f"Could not read metadata.json for {folder_path}: {e}")
         return {}
 
+
+def _read_competition_metadata_strict(container, folder_path, entity):
+    """
+    metadata.json for a read-modify-write (save_competition_settings).
+
+    Unlike `_read_competition_metadata`, a storage error is raised, never
+    mapped to {}: writing {} + settings back would wipe id, name, createdBy
+    and the other settings (see `_sync_competition_name`). Only a file that is
+    really missing or holds no JSON object is rebuilt, from the table row.
+    """
+    metadata_blob = container.get_blob_client(f"{folder_path}/metadata.json")
+    try:
+        raw = metadata_blob.download_blob().readall()
+    except ResourceNotFoundError:
+        raw = None
+    meta = None
+    if raw is not None:
+        try:
+            meta = json.loads(raw)
+        except ValueError:  # not JSON, or not UTF-8
+            meta = None
+    if not isinstance(meta, dict):
+        logging.warning(f"metadata.json of {entity['RowKey']} missing or not a JSON object; "
+                        "rebuilt from the competitions row")
+        meta = {"id": entity["RowKey"], "name": entity.get("Name", entity["RowKey"])}
+    return meta
+
 @app.route(route="get_categories", auth_level=func.AuthLevel.ANONYMOUS)
 def get_categories(req: func.HttpRequest) -> func.HttpResponse:
     """Returns all competition categories from the categories table."""
@@ -2012,6 +2048,8 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
             # The UI sends this map back in full on every save, so it needs the
             # stored one even for categories it cannot currently see.
             "judgingMethodOverrides": judging_overrides,
+            # Sent back in full on every save as well.
+            "trainees": sanitize_trainees(meta.get('trainees')),
             "files": files_data,
             "structure": structure,
             "competitionFiles": competition_files,
@@ -2036,10 +2074,9 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="save_competition_settings", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Save competition settings (e.g. judgingMethodOverrides) to
-    metadata.json. Settings are merged per key; a value that is itself a map
-    (judgingMethodOverrides) is replaced wholesale, so the client must send it
-    in full.
+    Save competition settings (SETTINGS_KEYS: judgingMethodOverrides,
+    trainees) to metadata.json. Settings are merged per key; each value is
+    replaced wholesale, so the client must send it in full.
     """
     logging.info('Saving competition settings...')
 
@@ -2049,10 +2086,13 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         req_body = req.get_json()
-        comp_id = req_body.get('id')
-        settings = req_body.get('settings', {})
     except ValueError:
         return func.HttpResponse("Invalid JSON body", status_code=400)
+    # A JSON array or scalar would otherwise 500 on .get().
+    if not isinstance(req_body, dict):
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    comp_id = req_body.get('id')
+    settings = req_body.get('settings', {})
 
     if not comp_id:
         return func.HttpResponse("Missing id parameter", status_code=400)
@@ -2061,6 +2101,10 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
     # otherwise blow up the `in` check below and the merge with a 500.
     if not isinstance(settings, dict):
         return func.HttpResponse("settings must be an object", status_code=400)
+
+    if any(key not in SETTINGS_KEYS for key in settings):
+        return func.HttpResponse(
+            f"Unknown setting; allowed: {', '.join(SETTINGS_KEYS)}", status_code=400)
 
     # Reject a malformed override map outright instead of silently sanitizing
     # it away: the client would otherwise believe its choice was stored.
@@ -2072,6 +2116,14 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
                 f"one of {', '.join(JUDGING_METHODS)}",
                 status_code=400
             )
+
+    # Stored in the normalized form (cleaned names, de-duplicated segments).
+    # The message names the rule and the entry's position, never the name.
+    if 'trainees' in settings:
+        trainees, error = parse_trainees(settings['trainees'])
+        if error is not None:
+            return func.HttpResponse(error, status_code=400)
+        settings = {**settings, 'trainees': trainees}
 
     try:
         entity, denied = _competition_for(caller, comp_id, "write")
@@ -2086,8 +2138,12 @@ def save_competition_settings(req: func.HttpRequest) -> func.HttpResponse:
 
         container = blob_service_client.get_container_client("fs-judgepapers")
 
-        # Read existing metadata
-        existing_meta = _read_competition_metadata(container, folder_path)
+        # Read existing metadata; a storage error writes nothing.
+        try:
+            existing_meta = _read_competition_metadata_strict(container, folder_path, entity)
+        except Exception as e:
+            logging.error(f"Could not read metadata.json of {comp_id}: {type(e).__name__}")
+            return func.HttpResponse("Storage unavailable, try again", status_code=503)
 
         # Merge new settings into existing metadata
         for key, value in settings.items():
@@ -2195,6 +2251,8 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
         options['judgingMethodOverrides'] = sanitize_judging_method_overrides(
             meta.get('judgingMethodOverrides')
         )
+        # The same for the trainees: only the stored list is ever generated.
+        options['trainees'] = sanitize_trainees(meta.get('trainees'))
 
         # Run the processor
         logging.info("Running processor...")
@@ -2227,7 +2285,13 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
         _bump_competition_counters(comp_id, generate_delta=1, set_last_generated=True)
         _store_competition_statistics(comp_id, stats or {})
 
-        return func.HttpResponse(f"Successfully processed {download_count} files and generated {upload_count} output files.", status_code=200)
+        message = f"Successfully processed {download_count} files and generated {upload_count} output files."
+        # Trainee sheets whose role line could not be stamped went in as the
+        # base official's copy; the site shows this sentence to the operator.
+        unstamped = (stats or {}).get("trainee_sheets_unstamped")
+        if isinstance(unstamped, int) and not isinstance(unstamped, bool) and unstamped > 0:
+            message += f" Warning: {unstamped} trainee sheet(s) still show the original name."
+        return func.HttpResponse(message, status_code=200)
 
     except Exception as e:
         logging.error(f"Error: {e}", exc_info=True)
@@ -3158,7 +3222,9 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
     # Only a file of this record: Blob Storage resolves `..` segments, so a raw
     # name could reach another record's folder.
     relative_name = _record_file_name(filename)
-    if relative_name is None:
+    # metadata.json / init.md define the record and hold its settings; they
+    # are not competition files the UI may remove.
+    if relative_name is None or relative_name in RECORD_CONTROL_FILES:
         return func.HttpResponse("Invalid filename", status_code=400)
     filename = relative_name
 
