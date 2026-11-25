@@ -176,6 +176,22 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
   write/owner/admin callers get every link, and `to`/`cc` on e-mail links; a
   read caller gets only the links they made, never recipients. `null` when
   the table can't be read.
+- `get_competition_details` also returns `scheduleCheck`: when a
+  `CompetitionSchedule.pdf` is uploaded, one row per segment in it, in the
+  schedule's order —
+  `{rows: [{date: "YYYY-MM-DD", startTime: "HH:MM", entries, name,
+  category, segment, status: "found"|"missing"|"notNeeded", prefix,
+  categoryKey}]}`. `found` = an uploaded segment prints the same category +
+  segment (start list title or line 2 of the judges' sheet; case, spacing
+  and punctuation ignored), with its FSM file `prefix`; `notNeeded` = no
+  papers and 0 entries; `missing` = no papers. `name`, `category` and
+  `segment` are as the schedule prints them (`category` is `""` when the
+  text can't be split). `categoryKey` is the key in `structure` of the
+  category the row belongs to, `null` when no uploaded category matches.
+  `null` instead of the object when there is no schedule or it can't be
+  read; the route never fails because of it. The site marks the missing
+  rows in its file list and asks for a confirmation before generating;
+  `generate_judging_papers` itself checks nothing and takes no override.
 - `revoke_download_link` (**POST only**, body `{"id", "linkId"}` →
   `{"status": "revoked", "linkId"}`) marks the link's `sentemails` row
   revoked (`RevokedUtc`, `RevokedByTid`, `RevokedByOid`), so the link then
