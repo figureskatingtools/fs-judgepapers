@@ -323,9 +323,9 @@ def add_trainee_tasks(person_tasks, trainees, segment_panels):
     Returns the number of trainee tasks added.
     """
     added = 0
-    for index, trainee in enumerate(trainees):
+    for trainee in trainees:
         task_role, label = TRAINEE_TASKS[trainee['role']]
-        slug = trainee_slug(trainee['name'], index)
+        slug = trainee_slug(trainee['name'])
         for prefix in trainee['segments']:
             segment = segment_panels.get(prefix)
             if segment is None:
@@ -670,27 +670,42 @@ def process_judging_papers(source_dir, output_dir, options=None):
         return dst
 
     trainee_sheets_unstamped = 0  # pages of trainee sheets that still show the official's name
+    trainee_segments_without_sheets = 0  # trainee tasks that got no sheet at all
+    trainee_sheets_made = {}  # dst -> what went in for it, in this run
 
     def trainee_sheet(src, dst, kind, name):
         """
-        The trainee's copy of an official's sheets src: dst, stamped once per
-        trainee, segment and sheet, always from the unstamped src. When the
-        stamp refuses (an FSM layout it can't cover safely, an unreadable
-        file), src itself goes in: papers with the official's name beat no
-        papers, and the personal cover in front carries the trainee's name.
+        The trainee's copy of an official's sheets src, for the packet: dst,
+        stamped once per trainee, segment and sheet in this run, always from
+        the unstamped src (a file already lying at dst, e.g. an upload under
+        that name, is overwritten, never used). When the stamp refuses (an FSM
+        layout it can't cover safely), src itself goes in: papers with the
+        official's name beat no papers, and the personal cover in front
+        carries the trainee's name. None when src can't even be read: the
+        segment gets no sheet.
         """
         nonlocal trainee_sheets_unstamped
-        if os.path.exists(dst):
-            return dst
+        if dst in trainee_sheets_made:
+            return trainee_sheets_made[dst]
         try:
             stamp_trainee_sheet(src, dst, kind, name)
-            return dst
+            result = dst
         except Exception as e:
             pages = _page_count(src)
             trainee_sheets_unstamped += pages
+            result = src if pages else None
             print(f"  Warning: a trainee sheet could not be stamped ({type(e).__name__}); "
-                  f"{pages} page(s) keep the original name")
-            return src
+                  + (f"{pages} page(s) keep the original name" if pages else "its source can't be read"))
+        trainee_sheets_made[dst] = result
+        return result
+
+    def add_trainee_sheet(file_list, sheet):
+        """Put a trainee's sheet in the packet; count a segment that got none."""
+        nonlocal trainee_segments_without_sheets
+        if sheet:
+            file_list.append(sheet)
+        else:
+            trainee_segments_without_sheets += 1
 
     setup_every_segment = calculation_setup_every_segment(options)
     setup_given = set()  # (calculation setup prefix, referee slug) already in a packet
@@ -827,9 +842,10 @@ def process_judging_papers(source_dir, output_dir, options=None):
                         for judge in segment_panels.get(prefix, {}).get('judges', []))
                         if os.path.exists(path)), None)
                     if base:
-                        file_list.append(trainee_sheet(
+                        add_trainee_sheet(file_list, trainee_sheet(
                             base, f"{base_path}_JudgesSheetAll_trainee_{slug}.pdf", "judge", data['name']))
                     else:
+                        add_trainee_sheet(file_list, None)
                         print(f"  Warning: no judge's sheets to copy for a judge trainee in {prefix}")
 
                 elif role == "technical_trainee":
@@ -841,10 +857,11 @@ def process_judging_papers(source_dir, output_dir, options=None):
                         sheets.reverse()
                     sheet = next((s for s in sheets if os.path.exists(f"{base_path}_{s}.pdf")), None)
                     if sheet:
-                        file_list.append(trainee_sheet(
+                        add_trainee_sheet(file_list, trainee_sheet(
                             sheet_without_withdrawn(base_path, sheet),
                             f"{base_path}_{sheet}_trainee_{slug}.pdf", "technical", data['name']))
                     else:
+                        add_trainee_sheet(file_list, None)
                         print(f"  Warning: no Technical Specialist's sheets to copy for a technical trainee in {prefix}")
 
             # 3. Merge and Save
@@ -960,6 +977,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
             judging_method_overrides=judging_overrides,
             combined_schedule_copies=schedule_copies if combined_schedules else 0,
             trainee_sheets_unstamped=trainee_sheets_unstamped,
+            trainee_segments_without_sheets=trainee_segments_without_sheets,
         )
     except Exception as e:
         print(f"  Warning: Failed to compute statistics: {e}")
@@ -971,7 +989,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
 def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withdrawn,
                         prefix_category_names, total_pages, withdrawn_pages_removed=0,
                         judging_method_overrides=None, combined_schedule_copies=0,
-                        trainee_sheets_unstamped=0):
+                        trainee_sheets_unstamped=0, trainee_segments_without_sheets=0):
     """
     Build a usage-statistics dict from the structures accumulated during
     process_judging_papers. Stored on the competitions table row (which
@@ -1089,4 +1107,5 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
         "trainee_count": len(trainee_slugs),
         "trainee_assignment_count": trainee_assignment_count,
         "trainee_sheets_unstamped": trainee_sheets_unstamped,
+        "trainee_segments_without_sheets": trainee_segments_without_sheets,
     }

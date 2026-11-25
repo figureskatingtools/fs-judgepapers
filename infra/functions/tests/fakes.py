@@ -13,12 +13,23 @@ routes depend on:
     '…'`). A row lacking the column never matches, like Table Storage.
   * blobs support prefix listing, metadata returned ONLY when `list_blobs` was
     asked for it, and `ResourceNotFoundError` on a missing blob.
+  * every blob write gives the blob a new ETag (`download_blob().properties.etag`),
+    and `upload_blob` honours `etag` + `match_condition` like azure-storage-blob
+    12.x: a mismatch raises `ResourceModifiedError` with overwrite=True and
+    `ResourceExistsError` with overwrite=False (the SDK converts it); without
+    conditions, overwrite=False on an existing blob raises `ResourceExistsError`.
+    `before_upload(name)` on the container, when set, runs first on every
+    upload: a test's stand-in for a concurrent writer.
 """
+import itertools
 import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core import MatchConditions
+from azure.core.exceptions import ResourceExistsError, ResourceModifiedError, ResourceNotFoundError
+
+_ETAGS = itertools.count(1)
 
 
 class FakeEntity(dict):
@@ -144,6 +155,7 @@ class FakeBlob:
         self.data = bytes(data)
         self.metadata = dict(metadata or {})
         self.last_modified = last_modified
+        self.etag = f'"0x8DE{next(_ETAGS):012X}"'
 
     def properties(self, *, with_metadata=True):
         return SimpleNamespace(
@@ -151,12 +163,14 @@ class FakeBlob:
             size=len(self.data),
             metadata=dict(self.metadata) if with_metadata else {},
             last_modified=self.last_modified,
+            etag=self.etag,
         )
 
 
 class FakeDownloader:
-    def __init__(self, data):
+    def __init__(self, data, properties=None):
         self._data = data
+        self.properties = properties
 
     def readall(self):
         return self._data
@@ -178,10 +192,10 @@ class FakeBlobClient:
         blob = self._container.blobs.get(self.blob_name)
         if blob is None:
             raise ResourceNotFoundError("blob not found")
-        return FakeDownloader(blob.data)
+        return FakeDownloader(blob.data, blob.properties())
 
     def upload_blob(self, data, overwrite=False, metadata=None, **kwargs):
-        self._container.upload_blob(self.blob_name, data, overwrite=overwrite, metadata=metadata)
+        self._container.upload_blob(self.blob_name, data, overwrite=overwrite, metadata=metadata, **kwargs)
 
     def get_blob_properties(self):
         blob = self._container.blobs.get(self.blob_name)
@@ -195,13 +209,29 @@ class FakeContainerClient:
         self.container_name = container_name
         self.blobs: dict[str, FakeBlob] = {}
         self._clock = datetime(2026, 1, 2, 10, 0, 0, tzinfo=timezone.utc)
+        self.before_upload = None
 
     def _tick(self):
         self._clock += timedelta(seconds=1)
         return self._clock
 
-    def upload_blob(self, name, data, overwrite=False, metadata=None, **kwargs):
-        if name in self.blobs and not overwrite:
+    def upload_blob(self, name, data, overwrite=False, metadata=None, etag=None, match_condition=None,
+                    **kwargs):
+        if self.before_upload is not None:
+            self.before_upload(name)
+        current = self.blobs.get(name)
+        if match_condition is not None and match_condition != MatchConditions.Unconditionally:
+            met = {
+                MatchConditions.IfNotModified: current is not None and current.etag == etag,
+                MatchConditions.IfModified: current is not None and current.etag != etag,
+                MatchConditions.IfPresent: current is not None,
+                MatchConditions.IfMissing: current is None,
+            }[match_condition]
+            if not met:
+                if not overwrite:
+                    raise ResourceExistsError("The specified blob already exists.")
+                raise ResourceModifiedError("The condition specified using HTTP conditional header(s) is not met.")
+        elif current is not None and not overwrite:
             raise ResourceExistsError("blob already exists")
         if hasattr(data, "read"):
             data = data.read()

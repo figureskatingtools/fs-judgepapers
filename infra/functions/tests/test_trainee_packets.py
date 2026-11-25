@@ -13,6 +13,7 @@ from pypdf import PdfWriter
 
 import processor
 from processor import day_summary
+from trainees import trainee_slug
 from trainee_sheets import UnsupportedLayout
 
 ICE_DANCE = {"abbreviation": "FSKXICEDANCE-ADVNOV", "displayName": "Advanced Novice Ice Dance",
@@ -210,6 +211,7 @@ def test_no_ts_sheet_at_all_adds_nothing(run):
 
     assert r.packet(SLUG) == [cover_name(SLUG), f"{FD}_StartListwithTimes.pdf"]
     assert r.stamps == []
+    assert r.stats["trainee_segments_without_sheets"] == 1
 
 
 def test_judge_and_technical_trainee_in_one_packet(run):
@@ -300,11 +302,28 @@ def test_a_trainee_listed_twice_gets_the_segment_once(run):
     assert r.stats["trainee_count"] == 1 and r.stats["trainee_assignment_count"] == 1
 
 
-def test_a_name_without_letters_a_to_z_gets_a_numbered_slug(run):
-    r = run({"trainees": [judge("Jon Judge", []), judge("Ωμέγα", [FD])]})
+def test_a_name_without_letters_a_to_z_gets_a_hashed_slug(run):
+    slug = trainee_slug("Ωμέγα")
+    assert slug.startswith("trainee-")
 
-    assert r.packet("trainee_2")[-1] == f"{FD}_JudgesSheetAll_trainee_trainee_2.pdf"
-    assert r.covers["trainee_2"][0] == "Ωμέγα"
+    r = run({"trainees": [judge("Trainee 2", [PD]), judge("Ωμέγα", [FD]), technical("ΩΜΈΓΑ", [PD])]})
+
+    # Two people, two packets (the numbered fallback once gave both trainee_2)
+    assert r.packet("trainee_2")[-1] == f"{PD}_JudgesSheetAll_trainee_trainee_2.pdf"
+    assert r.covers["trainee_2"][0] == "Trainee 2"
+    # The same name in two roles shares one packet
+    assert r.packet(slug) == [cover_name(slug),
+                              f"{PD}_StartListwithTimes.pdf", f"{PD}_TechnicalSpecialistSheet2_trainee_{slug}.pdf",
+                              f"{FD}_StartListwithTimes.pdf", f"{FD}_JudgesSheetAll_trainee_{slug}.pdf"]
+    assert r.covers[slug][0] == "Ωμέγα"
+
+
+def test_names_that_would_share_a_packet_keep_only_the_first(run):
+    r = run({"trainees": [judge("Anna-Maria Xu", [FD]), judge("Annamaria Xu", [PD])]})
+
+    assert r.packet("annamaria_xu") == [cover_name("annamaria_xu"), f"{FD}_StartListwithTimes.pdf",
+                                        f"{FD}_JudgesSheetAll_trainee_annamaria_xu.pdf"]
+    assert [name for _, _, _, name in r.stamps] == ["Anna-Maria Xu"]
 
 
 def test_a_stamp_that_raises_puts_the_base_sheets_in(run, capsys):
@@ -321,12 +340,42 @@ def test_a_stamp_that_raises_puts_the_base_sheets_in(run, capsys):
 
     files = r.packet(SLUG)
     assert f"{FD}_JudgesSheetAll_judge_jon_judge.pdf" in files
-    assert f"{FD}_TechnicalSpecialistSheet1_nowd.pdf" in files       # empty placeholder: 0 pages
+    # The TS sheet is an empty placeholder: unreadable, so the segment got no sheet
+    assert f"{FD}_TechnicalSpecialistSheet1_nowd.pdf" not in files
     assert not any("_trainee_" in f for f in files)
     assert r.stats["trainee_sheets_unstamped"] == 3
+    assert r.stats["trainee_segments_without_sheets"] == 1
     out = capsys.readouterr().out
-    assert "could not be stamped" in out
+    assert "could not be stamped" in out and "its source can't be read" in out
     assert TRAINEE not in out and SLUG not in out
+
+
+def test_a_file_already_named_like_a_stamped_copy_is_stamped_over(run):
+    planted = f"{FD}_JudgesSheetAll_trainee_{SLUG}.pdf"
+
+    def prepare(src):
+        (src / planted).write_bytes(b"uploaded by someone")
+
+    def stamp(src_pdf, dst_pdf, kind, name):
+        stamps.append(dst_pdf.rsplit("/", 1)[-1])
+        with open(dst_pdf, "wb") as fh:
+            fh.write(b"stamped")
+        return 1, 0, 0
+
+    stamps = []
+    r = run({"trainees": [judge(TRAINEE, [FD])]}, stamp=stamp, prepare=prepare)
+
+    assert stamps == [planted]
+    assert (r.src / planted).read_bytes() == b"stamped"
+    assert r.packet(SLUG)[-1] == planted
+
+
+def test_each_copy_is_stamped_once_per_run(run):
+    # A trainee joining a panel member's packet in two segments: one stamp per segment
+    r = run({"trainees": [judge("Dan Operator", [PD, FD]), judge("DAN  OPERATOR", [FD])]})
+
+    assert [dst for _, dst, _, _ in r.stamps] == [f"{PD}_JudgesSheetAll_trainee_dan_operator.pdf",
+                                                  f"{FD}_JudgesSheetAll_trainee_dan_operator.pdf"]
 
 
 def test_no_named_judge_on_the_segment_adds_no_sheets(run, capsys):
@@ -335,6 +384,7 @@ def test_no_named_judge_on_the_segment_adds_no_sheets(run, capsys):
 
     assert r.packet(SLUG) == [cover_name(SLUG), f"{FD}_StartListwithTimes.pdf"]
     assert r.stamps == []
+    assert r.stats["trainee_segments_without_sheets"] == 1
     out = capsys.readouterr().out
     assert f"no judge's sheets to copy for a judge trainee in {FD}" in out
 
@@ -403,6 +453,7 @@ def test_without_trainees_the_packets_are_unchanged(run, options):
     assert r.stats["trainee_count"] == 0
     assert r.stats["trainee_assignment_count"] == 0
     assert r.stats["trainee_sheets_unstamped"] == 0
+    assert r.stats["trainee_segments_without_sheets"] == 0
     assert not any("_trainee_" in path.name for path in r.src.iterdir())
     [summary] = r.summaries
     assert "trainee" not in dict(summary["roles"])

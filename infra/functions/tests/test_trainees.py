@@ -2,8 +2,10 @@
 settings route that writes it (strict, allowlisted, never wiping metadata.json
 on a storage error), the details and generate routes that read it, and
 delete_file refusing the record's own metadata.json."""
+import hashlib
 import json
 import os
+import unicodedata
 
 import pytest
 from azure.core.exceptions import HttpResponseError
@@ -172,15 +174,95 @@ def test_trainee_tasks_and_roles():
                                 "technical": ("technical_trainee", "Technical Trainee")}
 
 
-@pytest.mark.parametrize("name, index, slug", [
-    (NAME, 0, "vaino_akerstrom"),
-    ("Ann Lee", 4, "ann_lee"),
-    ("Иван Петров", 0, "trainee_1"),     # slugify keeps nothing but the space
-    ("李", 2, "trainee_3"),
-    ("", 0, "trainee_1"),
+def _hashed(key):
+    return "trainee-" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+
+
+@pytest.mark.parametrize("name, slug", [
+    (NAME, "vaino_akerstrom"),
+    ("Ann Lee", "ann_lee"),
+    ("Иван Петров", _hashed("иван петров")),     # slugify keeps nothing but the space
+    ("李", _hashed("李")),
+    ("", _hashed("")),
 ])
-def test_trainee_slug(name, index, slug):
-    assert tr.trainee_slug(name, index) == slug
+def test_trainee_slug(name, slug):
+    assert tr.trainee_slug(name) == slug
+
+
+def test_the_fallback_slug_is_one_per_name_and_never_a_slugify_result():
+    slug = tr.trainee_slug("Иван Петров")
+
+    assert tr.trainee_slug("  иван   ПЕТРОВ ") == slug
+    assert tr.trainee_slug(unicodedata.normalize("NFD", "Иван Петров")) == slug
+    assert tr.trainee_slug("Пётр Иванов") != slug
+    assert slug.startswith("trainee-") and len(slug) == len("trainee-") + 8
+    # slugify drops "-", so no panel member or Latin-named trainee can get it
+    assert tr.trainee_slug("Trainee 2") == "trainee_2"
+    assert "-" not in tr.slugify("trainee-" + slug[8:])
+
+
+# ---------------------------------------------------------------------------
+# Names: NFC, letters, one packet per slug
+# ---------------------------------------------------------------------------
+
+def test_parse_and_sanitize_store_the_nfc_form():
+    decomposed = unicodedata.normalize("NFD", NAME)
+    assert decomposed != NAME
+
+    clean, error = tr.parse_trainees([trainee(decomposed)])
+
+    assert error is None and clean[0]["name"] == NAME
+    assert tr.sanitize_trainees([trainee(decomposed)])[0]["name"] == NAME
+
+
+@pytest.mark.parametrize("name", ["\u0308", "- . -", "'", "\u0301\u0308"])
+def test_parse_refuses_a_name_without_a_letter_or_digit(name):
+    assert tr.parse_trainees([trainee(name)]) == (
+        None, "trainee 1: name must contain at least one letter or digit")
+    assert tr.sanitize_trainees([trainee(name)]) == []
+
+
+@pytest.mark.parametrize("segment", [" ", f" {SEG_A}", f"{SEG_A} ", "\u00a0X"])
+def test_parse_refuses_a_segment_with_outer_spaces(segment):
+    clean, error = tr.parse_trainees([trainee(segments=[segment])])
+
+    assert clean is None and "without leading or trailing spaces" in error
+    assert tr.sanitize_trainees([trainee(segments=[segment, SEG_A])])[0]["segments"] == [SEG_A]
+
+
+@pytest.mark.parametrize("first, second", [
+    ("Anna-Maria Xu", "Annamaria Xu"),        # both annamaria_xu
+    ("Ann Lee", "Ann Lée"),                   # both ann_lee
+])
+def test_parse_refuses_two_names_that_would_share_a_packet(first, second):
+    assert tr.trainee_slug(first) == tr.trainee_slug(second)
+    clean, error = tr.parse_trainees([trainee("Bo Ek"), trainee(first), trainee(second, "technical")])
+
+    assert clean is None
+    assert error == ("trainee 3: name is too close to trainee 2's (they would share one packet); "
+                     "use the same spelling for the same person")
+
+
+def test_parse_accepts_the_same_person_in_two_roles_whatever_the_case_or_spacing():
+    raw = [trainee("Ann Lee"), trainee("ANN  lee", "technical", [SEG_B]),
+           trainee("Иван Петров"), trainee("иван петров", "technical")]
+
+    clean, error = tr.parse_trainees(raw)
+
+    assert error is None and len(clean) == 4
+
+
+def test_the_numbered_fallback_no_longer_collides_with_a_real_name():
+    # used to be trainee_2 for both
+    clean, error = tr.parse_trainees([trainee("Trainee 2"), trainee("Иван Петров")])
+
+    assert error is None and len(clean) == 2
+
+
+def test_sanitize_drops_a_later_entry_that_would_share_a_packet():
+    raw = [trainee("Anna-Maria Xu"), trainee("Annamaria Xu", "technical"), trainee("ANNA-MARIA XU", "technical")]
+
+    assert tr.sanitize_trainees(raw) == [trainee("Anna-Maria Xu"), trainee("ANNA-MARIA XU", "technical")]
 
 
 # ---------------------------------------------------------------------------
@@ -363,17 +445,27 @@ def test_generate_without_stored_trainees_passes_an_empty_list(competition, monk
     assert options["trainees"] == []
 
 
-def test_generate_warns_about_unstamped_trainee_sheets(competition, monkeypatch):
-    response, _options = _generate(monkeypatch, {"trainee_sheets_unstamped": 3})
+@pytest.mark.parametrize("stats, warning", [
+    ({"trainee_sheets_unstamped": 3},
+     " Warning: 3 page(s) of trainee sheets still show the original name."),
+    ({"trainee_segments_without_sheets": 1},
+     " Warning: 1 trainee segment(s) got no sheets to copy."),
+    ({"trainee_sheets_unstamped": 3, "trainee_segments_without_sheets": 1},
+     " Warning: 3 page(s) of trainee sheets still show the original name. "
+     "1 trainee segment(s) got no sheets to copy."),
+])
+def test_generate_warns_once_about_trainee_sheets(stats, warning, competition, monkeypatch):
+    response, _options = _generate(monkeypatch, stats)
 
     assert response.status_code == 200
-    assert text(response).endswith(
-        " output files. Warning: 3 trainee sheet(s) still show the original name.")
+    assert text(response).endswith(" output files." + warning)
+    assert text(response).count(" Warning:") == 1
 
 
 @pytest.mark.parametrize("value", [0, None, -1, "3", True, 2.0])
-def test_generate_has_no_warning_without_unstamped_sheets(value, competition, monkeypatch):
-    response, _options = _generate(monkeypatch, {"trainee_sheets_unstamped": value})
+def test_generate_has_no_warning_without_trainee_problems(value, competition, monkeypatch):
+    response, _options = _generate(monkeypatch, {"trainee_sheets_unstamped": value,
+                                                 "trainee_segments_without_sheets": value})
 
     assert response.status_code == 200
     assert "Warning" not in text(response)
@@ -408,3 +500,163 @@ def test_delete_file_still_deletes_a_competition_file(competition, blobs):
 
     assert payload(response) == {"status": "deleted"}
     assert f"{competition['FolderPath']}/X_Other.pdf" not in blobs.blobs
+
+
+# ---------------------------------------------------------------------------
+# An unreadable metadata.json is a 503, never empty settings
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def unreadable_metadata(competition, blobs, monkeypatch):
+    """Every download of the competition's metadata.json fails (throttled)."""
+    path = f"{competition['FolderPath']}/metadata.json"
+    original = blobs.get_blob_client
+
+    def flaky(name):
+        client = original(name)
+        if name == path:
+            def fail():
+                raise HttpResponseError("throttled")
+            client.download_blob = fail
+        return client
+
+    monkeypatch.setattr(blobs, "get_blob_client", flaky)
+    return path
+
+
+def test_details_with_an_unreadable_metadata_json_is_503(unreadable_metadata, blobs):
+    before = blobs.blobs[unreadable_metadata].data
+
+    response = call(fa.get_competition_details, make_request(params={"id": COMP_ID}))
+
+    assert response.status_code == 503
+    assert text(response) == "Storage unavailable, try again"
+    assert blobs.blobs[unreadable_metadata].data == before
+
+
+def test_details_without_metadata_json_are_empty_settings_and_write_nothing(competition, blobs, caplog):
+    path = f"{competition['FolderPath']}/metadata.json"
+    del blobs.blobs[path]
+    caplog.set_level("WARNING")
+
+    response = call(fa.get_competition_details, make_request(params={"id": COMP_ID}))
+
+    assert response.status_code == 200, text(response)
+    assert payload(response)["trainees"] == [] and payload(response)["judgingMethodOverrides"] == {}
+    assert path not in blobs.blobs
+    assert "metadata.json" not in caplog.text
+
+
+def test_generate_with_an_unreadable_metadata_json_is_503_and_generates_nothing(
+        unreadable_metadata, blobs, tables, monkeypatch):
+    monkeypatch.setattr(fa, "process_judging_papers", lambda *a, **k: pytest.fail("generated"))
+    before = dict(blobs.blobs)
+
+    response = call(fa.generate_judging_papers, make_request(
+        "POST", body={"workingFolder": COMP_ID, "options": {"trainees": [trainee()]}}))
+
+    assert response.status_code == 503
+    assert text(response) == "Storage unavailable, try again"
+    assert blobs.blobs == before
+    assert "GenerateRunCount" not in tables["competitions"].row("GLOBAL", COMP_ID)
+
+
+# ---------------------------------------------------------------------------
+# Optimistic concurrency on metadata.json
+# ---------------------------------------------------------------------------
+
+def concurrent_writer(blobs, path, change, times=1):
+    """Before each of our next `times` uploads of path, someone else writes `change` into it."""
+    left = [times]
+
+    def before_upload(name):
+        if name != path or left[0] == 0:
+            return
+        left[0] -= 1
+        blobs.before_upload = None                     # their own write isn't intercepted
+        meta = json.loads(blobs.blobs[path].data) if path in blobs.blobs else {}
+        meta.update(change)
+        blobs.upload_blob(path, json.dumps(meta), overwrite=True)
+        blobs.before_upload = before_upload
+
+    blobs.before_upload = before_upload
+
+
+def test_a_concurrent_save_of_the_other_key_survives(competition, blobs):
+    path = f"{competition['FolderPath']}/metadata.json"
+    concurrent_writer(blobs, path, {"judgingMethodOverrides": {"SYNC": "ISU"}})
+
+    response = save({"trainees": [trainee()]})
+
+    assert response.status_code == 200
+    meta = metadata(blobs, competition)
+    assert meta["trainees"] == [trainee()]                       # ours
+    assert meta["judgingMethodOverrides"] == {"SYNC": "ISU"}     # theirs
+    assert meta["createdBy"] == USER_EMAIL
+
+
+def test_a_concurrent_creator_of_a_missing_file_is_not_overwritten(competition, blobs):
+    path = f"{competition['FolderPath']}/metadata.json"
+    del blobs.blobs[path]
+    concurrent_writer(blobs, path, {"id": COMP_ID, "createdBy": USER_EMAIL,
+                                    "judgingMethodOverrides": {"S": "ISU"}})
+
+    response = save({"trainees": [trainee()]})
+
+    assert response.status_code == 200
+    meta = metadata(blobs, competition)
+    assert meta["createdBy"] == USER_EMAIL and meta["judgingMethodOverrides"] == {"S": "ISU"}
+    assert meta["trainees"] == [trainee()]
+
+
+def test_a_file_that_keeps_changing_is_409_and_keeps_the_other_writes(competition, blobs):
+    path = f"{competition['FolderPath']}/metadata.json"
+    concurrent_writer(blobs, path, {"judgingMethodOverrides": {"SYNC": "ISU"}},
+                      times=fa.SETTINGS_SAVE_ATTEMPTS)
+
+    response = save({"trainees": [trainee()]})
+
+    assert response.status_code == 409
+    assert text(response) == "Settings changed meanwhile, try again"
+    meta = metadata(blobs, competition)
+    assert "trainees" not in meta and meta["judgingMethodOverrides"] == {"SYNC": "ISU"}
+
+
+def test_a_rename_racing_a_save_leaves_metadata_json_alone(competition, blobs, tables):
+    path = f"{competition['FolderPath']}/metadata.json"
+    concurrent_writer(blobs, path, {"trainees": [trainee()]})
+    entity = dict(tables["competitions"].row("GLOBAL", COMP_ID))
+
+    name = fa._sync_competition_name(tables["competitions"], fa.get_blob_service_client(), entity, "Autumn Cup")
+
+    assert name == "Autumn Cup"                                     # the table is authoritative
+    assert tables["competitions"].row("GLOBAL", COMP_ID)["Name"] == "Autumn Cup"
+    meta = metadata(blobs, competition)
+    assert meta["trainees"] == [trainee()] and meta["name"] == "Spring Cup"
+
+
+def test_a_rename_without_a_race_updates_metadata_json(competition, blobs, tables):
+    entity = dict(tables["competitions"].row("GLOBAL", COMP_ID))
+
+    fa._sync_competition_name(tables["competitions"], fa.get_blob_service_client(), entity, "Autumn Cup")
+
+    meta = metadata(blobs, competition)
+    assert meta["name"] == "Autumn Cup" and meta["judgingMethodOverrides"] == {"SYNC": "MUPI"}
+
+
+def test_the_fake_blob_store_behaves_like_the_sdk(blobs):
+    from azure.core import MatchConditions
+    from azure.core.exceptions import ResourceExistsError, ResourceModifiedError
+
+    client = blobs.get_blob_client("a/metadata.json")
+    client.upload_blob(b"{}", overwrite=False)
+    with pytest.raises(ResourceExistsError):
+        client.upload_blob(b"{}", overwrite=False)
+    etag = client.download_blob().properties.etag
+    client.upload_blob(b'{"a": 1}', overwrite=True, etag=etag, match_condition=MatchConditions.IfNotModified)
+    assert client.download_blob().properties.etag != etag
+    with pytest.raises(ResourceModifiedError):
+        client.upload_blob(b"{}", overwrite=True, etag=etag, match_condition=MatchConditions.IfNotModified)
+    with pytest.raises(ResourceExistsError):     # the SDK converts a 412 when overwrite=False
+        client.upload_blob(b"{}", overwrite=False, etag=etag, match_condition=MatchConditions.IfNotModified)
+    assert client.download_blob().readall() == b'{"a": 1}'

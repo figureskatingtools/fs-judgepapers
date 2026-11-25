@@ -193,21 +193,41 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
   `settings.trainees` is a list of at most 50
   `{"name", "role": "judge"|"technical", "segments": [FSM file prefix, …]}`
   (exactly these keys; a name of 1–80 characters without control characters
-  or `/ : @ < > \ "`, every character printable in the papers' font; at most
-  200 segments (none is fine) of 1–100 characters without `/`, `\` or control
-  characters), stored normalized (whitespace collapsed, duplicate segments
-  dropped). The stored `metadata.json` is read strictly first: a storage
-  error is **503** `Storage unavailable, try again` and nothing is written; a
-  missing file, or one that holds no JSON object, is rebuilt from the record
-  (`id`, `name`).
+  or `/ : @ < > \ "`, with at least one letter or digit, every character
+  printable in the papers' font; at most 200 segments (none is fine) of
+  1–100 characters without leading or trailing spaces, `/`, `\` or control
+  characters), stored normalized (Unicode NFC, whitespace collapsed,
+  duplicate segments dropped). Two entries whose names would give one
+  packet file name must be the same name (ignoring case and spacing): the
+  same person in two roles. Otherwise 400 `trainee N: name is too close to
+  trainee M's (they would share one packet); use the same spelling for the
+  same person`.
+  The save is a read-modify-write of `metadata.json` with optimistic
+  concurrency. A storage error reading it is **503** `Storage unavailable,
+  try again`, and nothing is written. A missing file, or one that holds no
+  JSON object, is rebuilt from the record (`id`, `name`). The write lands
+  only if the file is unchanged since the read; otherwise the save re-reads,
+  re-merges and retries (3 attempts in all), then answers **409** `Settings
+  changed meanwhile, try again`. A concurrent save of the other key or a
+  rename is therefore never lost. Two saves of the same key still end with
+  the last one, since each sends the full value.
 - `get_competition_details` returns the stored list as `trainees`
-  (sanitized: invalid entries or segments dropped), which the UI sends back
-  in full on every save. A stored segment that is not among the current files
-  stays there and is ignored when generating.
+  (sanitized: invalid entries or segments dropped, and a later entry whose
+  name would share an earlier one's packet), which the UI sends back in full
+  on every save. A stored segment that is not among the current files stays
+  there and is ignored when generating. When `metadata.json` can't be read
+  the route answers **503** `Storage unavailable, try again` instead of empty
+  settings, so the UI never saves back an empty list; a missing file is
+  empty settings.
 - `generate_judging_papers` reads the trainees (like the overrides) from
-  `metadata.json`, never from the request. When trainee sheets could not be
-  stamped and went in with the official's name, its 200 text gains
-  ` Warning: N trainee sheet(s) still show the original name.`
+  `metadata.json`, never from the request: **503** `Storage unavailable, try
+  again` before anything is generated when it can't be read. Its 200 text
+  may end with one ` Warning: ` suffix holding one or both sentences,
+  `N page(s) of trainee sheets still show the original name.` (sheets that
+  could not be stamped went in with the official's name) and
+  `M trainee segment(s) got no sheets to copy.` (no named judge's or
+  Technical Specialist's sheet, or an unreadable one), e.g.
+  ` Warning: 3 page(s) of trainee sheets still show the original name. 1 trainee segment(s) got no sheets to copy.`
 - `delete_file` refuses `metadata.json` and `init.md` (400 `Invalid filename`):
   they define the record and hold its settings.
 - A record with no `PlatformId` (pre-platform legacy) is **admin-only**.

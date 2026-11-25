@@ -67,7 +67,7 @@ The override is stored in the competition's `metadata.json`:
 
 Keys are category abbreviations, values `ISU` or `MUPI`; only deviations from the table default are kept. The UI writes it through `POST /api/save_competition_settings` (`{ "id": "<competition id>", "settings": { "judgingMethodOverrides": { ... } } }`, full map on every save, invalid values are rejected with 400). `GET /api/get_competition_details` returns each file's effective `judgingMethod` together with `defaultJudgingMethod` and `judgingMethodOverridable`, plus the stored map as `judgingMethodOverrides`. `generate_judging_papers` reads the map from `metadata.json` itself when it records statistics, so the client cannot desynchronise it.
 
-`save_competition_settings` stores only these two settings keys, `judgingMethodOverrides` and `trainees` (any other key is a 400), each replaced wholesale. It reads the existing `metadata.json` strictly: if storage can't be read it answers 503 and writes nothing, so a save never wipes the file's other contents. `metadata.json` itself (and `init.md`) can't be removed through `delete_file`.
+`save_competition_settings` stores only these two settings keys, `judgingMethodOverrides` and `trainees` (any other key is a 400), each replaced wholesale. It reads the existing `metadata.json` strictly: if storage can't be read it answers 503 `Storage unavailable, try again` and writes nothing. The write is conditional on the file being unchanged since that read; otherwise the save re-reads, re-merges and retries, and after three attempts answers 409 `Settings changed meanwhile, try again`. A save therefore never wipes the file's other contents, and a concurrent save of the other key (or a rename) is not lost. Two saves of the same key still end with the last one, since each sends its full value. `get_competition_details` and `generate_judging_papers` answer the same 503 when `metadata.json` can't be read, never empty settings; a missing file means no settings. `metadata.json` itself (and `init.md`) can't be removed through `delete_file`.
 
 ## Trainees
 
@@ -80,13 +80,13 @@ A trainee follows a segment as a judge or as a technical specialist without bein
 ] }
 ```
 
-`segments` are FSM file prefixes. The UI sends the full list through `save_competition_settings` (`settings.trainees`; at most 50 trainees, a malformed list is rejected with 400) and gets it back from `get_competition_details` as `trainees`. When generating:
+`segments` are FSM file prefixes. The UI sends the full list through `save_competition_settings` (`settings.trainees`; at most 50 trainees, a malformed list is rejected with 400; names are stored in Unicode NFC) and gets it back from `get_competition_details` as `trainees`. When generating:
 
 - Each trainee gets a personal packet like an official's: the cover (role `Judge Trainee` / `Technical Trainee`), then for each segment the usual time schedule or segment cover and a copy of an official's sheets with the trainee's name printed over the official's: **Judge No. 1's** judges' sheets for a judge trainee (the next judge's when Judge No. 1 has none), the **Technical Specialist 1** sheet for a technical trainee (**Technical Specialist 2** in a Pattern Dance segment). Withdrawn skaters' pages are left out as for the officials.
-- A trainee with the same name as a panel member of that day gets one packet with both.
+- A trainee with the same name as a panel member of that day gets one packet with both, and so does one trainee listed in both roles. Two *different* names that would give the same packet file name (e.g. `Anna-Maria Xu` and `Annamaria Xu`) are refused when saving: `trainee N: name is too close to trainee M's (they would share one packet); use the same spelling for the same person`. A name with no a-z/0-9 letter after transliteration (e.g. all Cyrillic) gets a packet file named `trainee-` + 8 hex digits of a hash of the name.
 - A trainee task is dropped where the same person already holds those sheets (judge or referee of the segment; TS 1 or TS 2).
 - A stored segment that is not among the current files is kept and ignored.
-- If a sheet's layout can't be stamped safely, the official's copy goes in unchanged and the generate response ends with `Warning: N trainee sheet(s) still show the original name.`
+- If a sheet's layout can't be stamped safely, the official's copy goes in unchanged. If there is no sheet to copy (no named judge, no Technical Specialist sheet, or an unreadable one), the segment gets only its cover and time schedule. The generate response then ends with one warning, e.g. `Warning: 3 page(s) of trainee sheets still show the original name. 1 trainee segment(s) got no sheets to copy.`
 - The day document's check block counts the trainees (`… · 2 trainees`).
 
 The official's name stays in the copied sheets' text layer (covered on the page and in print, but found by a text search of the PDF).

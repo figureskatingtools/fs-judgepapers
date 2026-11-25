@@ -20,6 +20,7 @@ lenient read side (a hand-edited metadata.json can never break a read or a
 generate run). Messages name the rule and the entry's position, never the
 name: they end up in responses and the site may log them.
 """
+import hashlib
 import re
 import unicodedata
 
@@ -65,17 +66,36 @@ def _drawable(name):
     return True
 
 
+def _nfc_sender_name(raw):
+    """validate_sender_name on the NFC form: a decomposed Ä would otherwise be
+    drawn as A + a combining mark of zero advance. None if invalid."""
+    if not isinstance(raw, str):
+        return None
+    return validate_sender_name(unicodedata.normalize("NFC", raw))
+
+
+def _has_letter_or_digit(name):
+    """A lone combining mark or punctuation is no name."""
+    return any(ch.isalnum() for ch in name)
+
+
 def _clean_name(raw):
     """The cleaned, printable name, or None."""
-    name = validate_sender_name(raw)
-    if name is None or not _drawable(name):
+    name = _nfc_sender_name(raw)
+    if name is None or not _has_letter_or_digit(name) or not _drawable(name):
         return None
     return name
+
+
+def _name_key(name):
+    """One person's spelling, whatever the case, spacing or Unicode form."""
+    return unicodedata.normalize("NFC", " ".join(name.split())).casefold()
 
 
 def _valid_segment(value):
     return (isinstance(value, str)
             and 1 <= len(value) <= MAX_SEGMENT_LENGTH
+            and value == value.strip()
             and not any(ch in _SEGMENT_FORBIDDEN or unicodedata.category(ch).startswith("C")
                         for ch in value))
 
@@ -97,17 +117,28 @@ def parse_trainees(raw):
         return None, f"at most {MAX_TRAINEES} trainees"
 
     clean = []
+    slugs = {}  # slug -> (position, name key) of the first entry with it
     for position, entry in enumerate(raw, start=1):
         where = f"trainee {position}"
         if not isinstance(entry, dict) or set(entry) != TRAINEE_KEYS:
             return None, f"{where}: must be an object with exactly the keys name, role and segments"
 
-        name = validate_sender_name(entry["name"])
+        name = _nfc_sender_name(entry["name"])
         if name is None:
             return None, (f"{where}: name must be 1 to {SENDER_NAME_MAX_LENGTH} characters, "
                           "without control characters or any of / : @ < > \\ \"")
+        if not _has_letter_or_digit(name):
+            return None, f"{where}: name must contain at least one letter or digit"
         if not _drawable(name):
             return None, f"{where}: name has a character the papers' font cannot print"
+        # One packet per slug: two people whose names slugify alike would share
+        # one packet under the first one's name. The same name in two roles
+        # (one person) is fine.
+        key = _name_key(name)
+        first_position, first_key = slugs.setdefault(trainee_slug(name), (position, key))
+        if first_key != key:
+            return None, (f"{where}: name is too close to trainee {first_position}'s (they would "
+                          "share one packet); use the same spelling for the same person")
 
         role = entry["role"]
         if not isinstance(role, str) or role not in TRAINEE_ROLES:
@@ -118,7 +149,7 @@ def parse_trainees(raw):
             return None, f"{where}: segments must be a list of at most {MAX_SEGMENTS} segments"
         if not all(_valid_segment(s) for s in segments):
             return None, (f"{where}: each segment must be 1 to {MAX_SEGMENT_LENGTH} characters, "
-                          "without / \\ or control characters")
+                          "without leading or trailing spaces, / \\ or control characters")
 
         clean.append({"name": name, "role": role, "segments": _unique(segments)})
     return clean, None
@@ -127,12 +158,15 @@ def parse_trainees(raw):
 def sanitize_trainees(raw):
     """
     The stored list as the pipeline and the UI may use it: anything invalid is
-    dropped (a whole entry when its name or role is, a single segment when
-    only that is), never raises. Mirrors categories.sanitize_judging_method_overrides.
+    dropped (a whole entry when its name or role is, or when its name would
+    share an earlier entry's packet without being the same name; a single
+    segment when only that is), never raises. Mirrors
+    categories.sanitize_judging_method_overrides.
     """
     if not isinstance(raw, list):
         return []
     clean = []
+    slugs = {}  # slug -> name key of the first entry kept with it
     for entry in raw:
         if len(clean) >= MAX_TRAINEES:
             break
@@ -145,6 +179,9 @@ def sanitize_trainees(raw):
         role = entry.get("role")
         if name is None or not isinstance(role, str) or role not in TRAINEE_ROLES:
             continue
+        key = _name_key(name)
+        if slugs.setdefault(trainee_slug(name), key) != key:
+            continue
         segments = entry.get("segments")
         if not isinstance(segments, list):
             segments = []
@@ -153,15 +190,17 @@ def sanitize_trainees(raw):
     return clean
 
 
-def trainee_slug(name, index):
+def trainee_slug(name):
     """
     The file-name slug of a trainee: slugify(name) as for the panel's
-    officials (so the same person on a panel shares one packet), or
-    trainee_<n> (n = position + 1) when the name has no a-z/0-9 character
-    left after slugify (an all-Cyrillic or all-Š name; "_" alone would be
-    no name at all).
+    officials (so the same person on a panel shares one packet). A name with
+    no a-z/0-9 character left after slugify (all-Cyrillic, all-Š) gets
+    trainee-<the first 8 hex digits of sha1 of its _name_key>: the same for
+    the same name in two entries, and never a slugify result (so never a
+    panel member's slug), since slugify keeps no "-".
     """
-    slug = slugify(name if isinstance(name, str) else "")
+    name = name if isinstance(name, str) else ""
+    slug = slugify(name)
     if not re.search(r"[a-z0-9]", slug):
-        return f"trainee_{index + 1}"
+        return "trainee-" + hashlib.sha1(_name_key(name).encode("utf-8")).hexdigest()[:8]
     return slug
