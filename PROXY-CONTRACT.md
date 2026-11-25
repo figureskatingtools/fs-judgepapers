@@ -184,6 +184,32 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
   competition, a read caller only their own (403 `platform_read_only`
   otherwise). 404 `link_not_found: …` for an unknown or already revoked link,
   400 for a non-object body or a `linkId` that is not 64 lowercase hex.
+- `save_competition_settings` (**POST only**, body `{"id", "settings"}` →
+  `Settings saved`) stores only the keys `judgingMethodOverrides` and
+  `trainees` in the record's `metadata.json`, each replaced wholesale (the
+  client sends the full value). 400 for a non-object body or `settings`, any
+  other key, a malformed override map or a malformed trainee list; a trainee
+  message names the broken rule and the entry's position, never the name.
+  `settings.trainees` is a list of at most 50
+  `{"name", "role": "judge"|"technical", "segments": [FSM file prefix, …]}`
+  (exactly these keys; a name of 1–80 characters without control characters
+  or `/ : @ < > \ "`, every character printable in the papers' font; at most
+  200 segments (none is fine) of 1–100 characters without `/`, `\` or control
+  characters), stored normalized (whitespace collapsed, duplicate segments
+  dropped). The stored `metadata.json` is read strictly first: a storage
+  error is **503** `Storage unavailable, try again` and nothing is written; a
+  missing file, or one that holds no JSON object, is rebuilt from the record
+  (`id`, `name`).
+- `get_competition_details` returns the stored list as `trainees`
+  (sanitized: invalid entries or segments dropped), which the UI sends back
+  in full on every save. A stored segment that is not among the current files
+  stays there and is ignored when generating.
+- `generate_judging_papers` reads the trainees (like the overrides) from
+  `metadata.json`, never from the request. When trainee sheets could not be
+  stamped and went in with the official's name, its 200 text gains
+  ` Warning: N trainee sheet(s) still show the original name.`
+- `delete_file` refuses `metadata.json` and `init.md` (400 `Invalid filename`):
+  they define the record and hold its settings.
 - A record with no `PlatformId` (pre-platform legacy) is **admin-only**.
 - An unknown or deleted (hidden) record is the same 404 as no access.
 - `CreatedBy` keeps the creator's e-mail as history only; ownership is the

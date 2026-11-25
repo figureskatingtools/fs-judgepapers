@@ -189,6 +189,7 @@ ROLE_GROUP_NAMES = {
     "technical_specialist": ("technical specialist", "technical specialists"),
     "data_operator": ("data operator", "data operators"),
     "replay_operator": ("replay operator", "replay operators"),
+    "trainee": ("trainee", "trainees"),
 }
 
 COVER_TEXT_GREY = 0.35

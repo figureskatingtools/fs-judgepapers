@@ -32,6 +32,7 @@ Sign-in is Microsoft Entra ID enforced by App Service Easy Auth on [figureskatin
 - **Category names as printed** — categories are named as FSM prints them on the uploaded `JudgesSheetAll`, in the competition's own language
 - **Category Management** — Categories loaded from Azure Table Storage (ISU/MUPI judging methods); synchronized-skating categories can be switched between ISU and MUPI per competition
 - **Competition Workflow** — List, create, upload PDFs, generate and download judging packets
+- **Trainees** — judge and technical trainees named in the tool get their own packets, with copies of an official's sheets carrying the trainee's name (see [Trainees](#trainees))
 - **Serverless & Secure** — Azure Functions with Managed Identity for storage access
 - **Retention** — a competition's files and e-mail addresses are deleted when the competition is deleted on figureskatingtools.com (anonymous usage statistics stay). A record no competition stands behind any more (or one from before the shared competitions) is deleted the same way once it is more than 60 days old. Logs are kept 90 days.
 
@@ -65,6 +66,30 @@ The override is stored in the competition's `metadata.json`:
 ```
 
 Keys are category abbreviations, values `ISU` or `MUPI`; only deviations from the table default are kept. The UI writes it through `POST /api/save_competition_settings` (`{ "id": "<competition id>", "settings": { "judgingMethodOverrides": { ... } } }`, full map on every save, invalid values are rejected with 400). `GET /api/get_competition_details` returns each file's effective `judgingMethod` together with `defaultJudgingMethod` and `judgingMethodOverridable`, plus the stored map as `judgingMethodOverrides`. `generate_judging_papers` reads the map from `metadata.json` itself when it records statistics, so the client cannot desynchronise it.
+
+`save_competition_settings` stores only these two settings keys, `judgingMethodOverrides` and `trainees` (any other key is a 400), each replaced wholesale. It reads the existing `metadata.json` strictly: if storage can't be read it answers 503 and writes nothing, so a save never wipes the file's other contents. `metadata.json` itself (and `init.md`) can't be removed through `delete_file`.
+
+## Trainees
+
+A trainee follows a segment as a judge or as a technical specialist without being on the FSM panel. Trainees are named in this tool, not in FS Manager, and stored in the competition's `metadata.json`, so they survive a re-import of the exports:
+
+```json
+{ "trainees": [
+    { "name": "Väinö Åkerström", "role": "judge",     "segments": ["FSKMSINGLES-JUNIOR----QUAL000100--"] },
+    { "name": "Väinö Åkerström", "role": "technical", "segments": ["FSKXICEDANCEJUNIOR----QUAL000100--"] }
+] }
+```
+
+`segments` are FSM file prefixes. The UI sends the full list through `save_competition_settings` (`settings.trainees`; at most 50 trainees, a malformed list is rejected with 400) and gets it back from `get_competition_details` as `trainees`. When generating:
+
+- Each trainee gets a personal packet like an official's: the cover (role `Judge Trainee` / `Technical Trainee`), then for each segment the usual time schedule or segment cover and a copy of an official's sheets with the trainee's name printed over the official's: **Judge No. 1's** judges' sheets for a judge trainee (the next judge's when Judge No. 1 has none), the **Technical Specialist 1** sheet for a technical trainee (**Technical Specialist 2** in a Pattern Dance segment). Withdrawn skaters' pages are left out as for the officials.
+- A trainee with the same name as a panel member of that day gets one packet with both.
+- A trainee task is dropped where the same person already holds those sheets (judge or referee of the segment; TS 1 or TS 2).
+- A stored segment that is not among the current files is kept and ignored.
+- If a sheet's layout can't be stamped safely, the official's copy goes in unchanged and the generate response ends with `Warning: N trainee sheet(s) still show the original name.`
+- The day document's check block counts the trainees (`… · 2 trainees`).
+
+The official's name stays in the copied sheets' text layer (covered on the page and in print, but found by a text search of the PDF).
 
 ## Branch Strategy
 

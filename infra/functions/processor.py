@@ -14,6 +14,8 @@ try:
     from .categories import load_categories, match_category, parse_filename_generic, effective_judging_method, names_from_sheet_line
     from .competition_schedule import parse_competition_schedule, get_schedule_start_time
     from .combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
+    from .trainees import TRAINEE_TASKS, sanitize_trainees, trainee_slug
+    from .trainee_sheets import stamp_trainee_sheet
 except ImportError:
     # Fallback for local testing if not running as package
     from split_judges_sheets import split_pdf, filter_withdrawn_pages
@@ -22,6 +24,8 @@ except ImportError:
     from categories import load_categories, match_category, parse_filename_generic, effective_judging_method, names_from_sheet_line
     from competition_schedule import parse_competition_schedule, get_schedule_start_time
     from combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
+    from trainees import TRAINEE_TASKS, sanitize_trainees, trainee_slug
+    from trainee_sheets import stamp_trainee_sheet
 
 
 def _get_categories_for_processor():
@@ -294,7 +298,61 @@ DAY_ROLE_GROUPS = {
     'technical_specialist_2': 'technical_specialist',
     'data_operator': 'data_operator',
     'replay_operator': 'replay_operator',
+    'judge_trainee': 'trainee',
+    'technical_trainee': 'trainee',
 }
+
+# The task roles of trainees (issue #93; trainees.TRAINEE_TASKS), and the panel
+# roles on the same segment that already hold the sheets a trainee task copies:
+# that person needs no trainee copy of them (step 2.5)
+TRAINEE_TASK_ROLES = tuple(task for task, _ in TRAINEE_TASKS.values())
+TRAINEE_COVERED_BY = {
+    'judge_trainee': ('judge', 'referee'),
+    'technical_trainee': ('technical_specialist_1', 'technical_specialist_2'),
+}
+
+
+def add_trainee_tasks(person_tasks, trainees, segment_panels):
+    """
+    Add the trainees' tasks to person_tasks (step 2). segment_panels:
+    {prefix: {'date', 'title', 'judges'}} for every segment that got a panel
+    and a start list; a trainee's other segments (not among the current
+    files, e.g. after a re-import) are ignored. A trainee whose slug already
+    has a packet that day (a panel member of the same name) joins it: one
+    packet per person, the panel's spelling of the name stays.
+    Returns the number of trainee tasks added.
+    """
+    added = 0
+    for index, trainee in enumerate(trainees):
+        task_role, label = TRAINEE_TASKS[trainee['role']]
+        slug = trainee_slug(trainee['name'], index)
+        for prefix in trainee['segments']:
+            segment = segment_panels.get(prefix)
+            if segment is None:
+                continue
+            persons = person_tasks.setdefault(segment['date'], {})
+            if slug not in persons:
+                persons[slug] = {
+                    'name': trainee['name'],
+                    'title': segment['title'],
+                    'tasks': [],
+                    'role_labels': {},
+                }
+            data = persons[slug]
+            if (prefix, task_role) in data['tasks']:
+                continue  # the same trainee listed twice for the segment
+            data['tasks'].append((prefix, task_role))
+            data['role_labels'][(prefix, task_role)] = label
+            added += 1
+    return added
+
+
+def _page_count(path):
+    """Pages of a PDF, 0 when it can't be read (best-effort, for counters only)."""
+    try:
+        return len(PdfReader(path).pages)
+    except Exception:
+        return 0
 
 
 def day_summary(date_str, persons, pages, file_name, prefix_start_times, prefix_end_times,
@@ -347,6 +405,9 @@ def process_judging_papers(source_dir, output_dir, options=None):
     # Per-competition ISU/MUPI choices for synchronized-skating categories.
     # Statistics only — the PDF pipeline never branches on the judging method.
     judging_overrides = options.get('judgingMethodOverrides') or {}
+    # Trainees named in this tool (issue #93); generate passes the stored
+    # list, other callers may pass anything: only a clean list is used
+    trainees = sanitize_trainees(options.get('trainees'))
 
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
@@ -439,6 +500,9 @@ def process_judging_papers(source_dir, output_dir, options=None):
     
     # Data structure to hold tasks for the final merge
     person_tasks = {}
+    # prefix -> {'date', 'title', 'judges': judge slugs in panel order}, for
+    # every segment with a panel and a start list: where trainees can go
+    segment_panels = {}
     
     for root, dirs, files in os.walk(source_dir):
         for file in files:
@@ -482,6 +546,11 @@ def process_judging_papers(source_dir, output_dir, options=None):
                     
                 # Extract Panel Info (Roles and Names)
                 panel = get_panel_info(panel_path)
+                segment_panels[prefix] = {
+                    'date': date_str,
+                    'title': title,
+                    'judges': [slugify(name) for role, name, _ in panel if role == 'judge'],
+                }
                 
                 # Process each person in the panel
                 for role, name, label in panel:
@@ -503,22 +572,34 @@ def process_judging_papers(source_dir, output_dir, options=None):
                     person_tasks[date_str][slug]['tasks'].append((prefix, role))
                     person_tasks[date_str][slug]['role_labels'][(prefix, role)] = label
 
+    # The trainees' tasks, once every panel has been read
+    if trainees:
+        added = add_trainee_tasks(person_tasks, trainees, segment_panels)
+        print(f"  Trainee tasks: {added}")
+
     # ---------------------------------------------------------
-    # 2.5 Filter Conflicts (Referee overrides Judge)
+    # 2.5 Filter Conflicts (Referee overrides Judge; a trainee task is dropped
+    # where the same person already holds those sheets)
     # ---------------------------------------------------------
     for date_str, persons in person_tasks.items():
         for slug, data in persons.items():
             tasks = data['tasks']
+            # Roles per prefix in the order they were added (panel roles before
+            # trainee tasks), so a person's sheets within one segment keep a
+            # stable order; a dict is an ordered set
             prefix_roles = {}
             for prefix, role in tasks:
                 if prefix not in prefix_roles:
-                    prefix_roles[prefix] = set()
-                prefix_roles[prefix].add(role)
+                    prefix_roles[prefix] = {}
+                prefix_roles[prefix][role] = None
             
             cleaned_tasks = []
             for prefix, roles in prefix_roles.items():
                 if 'referee' in roles and 'judge' in roles:
-                    roles.remove('judge')
+                    del roles['judge']
+                for trainee_role, covered_by in TRAINEE_COVERED_BY.items():
+                    if trainee_role in roles and any(role in roles for role in covered_by):
+                        del roles[trainee_role]
                 
                 for role in roles:
                     cleaned_tasks.append((prefix, role))
@@ -587,6 +668,29 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 print(f"  Removed {removed} withdrawn page(s) from {os.path.basename(src)}")
                 withdrawn_pages_removed += removed
         return dst
+
+    trainee_sheets_unstamped = 0  # pages of trainee sheets that still show the official's name
+
+    def trainee_sheet(src, dst, kind, name):
+        """
+        The trainee's copy of an official's sheets src: dst, stamped once per
+        trainee, segment and sheet, always from the unstamped src. When the
+        stamp refuses (an FSM layout it can't cover safely, an unreadable
+        file), src itself goes in: papers with the official's name beat no
+        papers, and the personal cover in front carries the trainee's name.
+        """
+        nonlocal trainee_sheets_unstamped
+        if os.path.exists(dst):
+            return dst
+        try:
+            stamp_trainee_sheet(src, dst, kind, name)
+            return dst
+        except Exception as e:
+            pages = _page_count(src)
+            trainee_sheets_unstamped += pages
+            print(f"  Warning: a trainee sheet could not be stamped ({type(e).__name__}); "
+                  f"{pages} page(s) keep the original name")
+            return src
 
     setup_every_segment = calculation_setup_every_segment(options)
     setup_given = set()  # (calculation setup prefix, referee slug) already in a packet
@@ -714,7 +818,35 @@ def process_judging_papers(source_dir, output_dir, options=None):
                     
                 elif role in ["data_operator", "replay_operator"]:
                     file_list.append(f"{base_path}_PlannedProgramContent.pdf")
-            
+
+                elif role == "judge_trainee":
+                    # A copy of the first judge's sheets (panel order) that
+                    # exist; the split files already leave out withdrawn skaters
+                    base = next((path for path in (
+                        f"{base_path}_JudgesSheetAll_judge_{judge}.pdf"
+                        for judge in segment_panels.get(prefix, {}).get('judges', []))
+                        if os.path.exists(path)), None)
+                    if base:
+                        file_list.append(trainee_sheet(
+                            base, f"{base_path}_JudgesSheetAll_trainee_{slug}.pdf", "judge", data['name']))
+                    else:
+                        print(f"  Warning: no judge's sheets to copy for a judge trainee in {prefix}")
+
+                elif role == "technical_trainee":
+                    # TS 1's sheet; TS 2's in a Pattern Dance, where TS 1 doesn't
+                    # use theirs (PATTERN_DANCE_SKIPPED_ROLES), whatever
+                    # globalPatternDanceAllPapers says; the other one if missing
+                    sheets = ["TechnicalSpecialistSheet1", "TechnicalSpecialistSheet2"]
+                    if is_pattern_dance(prefix_segment_names.get(prefix)):
+                        sheets.reverse()
+                    sheet = next((s for s in sheets if os.path.exists(f"{base_path}_{s}.pdf")), None)
+                    if sheet:
+                        file_list.append(trainee_sheet(
+                            sheet_without_withdrawn(base_path, sheet),
+                            f"{base_path}_{sheet}_trainee_{slug}.pdf", "technical", data['name']))
+                    else:
+                        print(f"  Warning: no Technical Specialist's sheets to copy for a technical trainee in {prefix}")
+
             # 3. Merge and Save
             output_filename = f"judgingpapers_{date_str}_{slug}.pdf"
             output_path = os.path.join(output_dir, output_filename)
@@ -826,7 +958,8 @@ def process_judging_papers(source_dir, output_dir, options=None):
             categories, schedule_entries, person_tasks, prefix_withdrawn,
             prefix_category_names, total_pages, withdrawn_pages_removed,
             judging_method_overrides=judging_overrides,
-            combined_schedule_copies=schedule_copies if combined_schedules else 0
+            combined_schedule_copies=schedule_copies if combined_schedules else 0,
+            trainee_sheets_unstamped=trainee_sheets_unstamped,
         )
     except Exception as e:
         print(f"  Warning: Failed to compute statistics: {e}")
@@ -837,7 +970,8 @@ def process_judging_papers(source_dir, output_dir, options=None):
 
 def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withdrawn,
                         prefix_category_names, total_pages, withdrawn_pages_removed=0,
-                        judging_method_overrides=None, combined_schedule_copies=0):
+                        judging_method_overrides=None, combined_schedule_copies=0,
+                        trainee_sheets_unstamped=0):
     """
     Build a usage-statistics dict from the structures accumulated during
     process_judging_papers. Stored on the competitions table row (which
@@ -847,8 +981,10 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
     prefixes = set()
     role_slugs = {}        # role bucket -> set of person slugs
     judge_slugs = set()    # slugs holding role 'judge'
-    all_slugs = set()      # slugs across all roles
+    all_slugs = set()      # slugs on a panel (any panel role); trainees only count below
+    trainee_slugs = set()  # slugs with a trainee task (issue #93)
     judge_assignment_count = 0
+    trainee_assignment_count = 0
     role_buckets = {
         'referee': 'referees',
         'technical_controller': 'technical_controllers',
@@ -860,9 +996,13 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
 
     for date_str, persons in person_tasks.items():
         for slug, data in persons.items():
-            all_slugs.add(slug)
             for prefix, role in data['tasks']:
                 prefixes.add(prefix)
+                if role in TRAINEE_TASK_ROLES:
+                    trainee_slugs.add(slug)
+                    trainee_assignment_count += 1
+                    continue
+                all_slugs.add(slug)
                 if role == 'judge':
                     judge_slugs.add(slug)
                     judge_assignment_count += 1
@@ -946,4 +1086,7 @@ def _compute_statistics(categories, schedule_entries, person_tasks, prefix_withd
         "pages_generated": total_pages,
         "combined_schedule": combined_schedule_copies > 0,
         "combined_schedule_copies": combined_schedule_copies,
+        "trainee_count": len(trainee_slugs),
+        "trainee_assignment_count": trainee_assignment_count,
+        "trainee_sheets_unstamped": trainee_sheets_unstamped,
     }
