@@ -150,11 +150,16 @@ def test_a_card_of_exactly_that_name_wins_over_a_split_group(keys):
     assert [r["categoryKey"] for r in result] == ["JUNIORIT"]
 
 
-@pytest.mark.parametrize("keys", [["JUNIORIT #2", "JUNIORIT #1"], ["JUNIORIT #1", "JUNIORIT #2"]],
-                         ids=["group 2 first", "group 1 first"])
-def test_a_bare_name_among_split_groups_goes_to_the_lowest_whatever_the_order(keys):
+@pytest.mark.parametrize("keys, lowest", [
+    (["JUNIORIT #2", "JUNIORIT #1"], "JUNIORIT #1"),
+    (["JUNIORIT #1", "JUNIORIT #2"], "JUNIORIT #1"),
+    # By number, not by spelling: group 2 comes before group 10
+    (["JUNIORIT #10", "JUNIORIT #2"], "JUNIORIT #2"),
+    (["JUNIORIT #2", "JUNIORIT #10", "JUNIORIT # 3"], "JUNIORIT #2"),
+], ids=["2 then 1", "1 then 2", "10 then 2", "2, 10, 3"])
+def test_a_bare_name_among_split_groups_goes_to_the_lowest_whatever_the_order(keys, lowest):
     result = check_schedule([row("20260911", "17:00", "Juniorit", "Free Skating")], [], keys)
-    assert [r["categoryKey"] for r in result] == ["JUNIORIT #1"]
+    assert [r["categoryKey"] for r in result] == [lowest]
 
 
 def test_a_numbered_segment_printed_as_one_string_still_finds_its_card():

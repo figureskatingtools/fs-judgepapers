@@ -23,7 +23,7 @@ except ImportError:
 
 # A split group's mark at the end of a category name ('SM-Noviisit #2'); the
 # details structure adds one that FSM did not print.
-_TRAILING_SPLIT_MARK_RE = re.compile(r"\s*#\s*\d+$")
+_TRAILING_SPLIT_MARK_RE = re.compile(r"\s*#\s*(\d+)$")
 
 
 def start_list_title(page_text):
@@ -41,6 +41,12 @@ def start_list_title(page_text):
 def _iso_date(yyyymmdd):
     text = yyyymmdd or ""
     return f"{text[:4]}-{text[4:6]}-{text[6:8]}" if len(text) == 8 and text.isdigit() else None
+
+
+def _split_group_order(key):
+    """Sort key of a card name by its split group's number: '#2' before '#10'."""
+    mark = _TRAILING_SPLIT_MARK_RE.search(key)
+    return (int(mark.group(1)) if mark else 0, key)
 
 
 def check_schedule(rows, segments, category_keys=()):
@@ -110,7 +116,7 @@ def check_schedule(rows, segments, category_keys=()):
     for key in category_keys:
         if _folded(key):
             keys_by_name.setdefault(_folded(key), key)
-    for key in sorted(k for k in category_keys if k):
+    for key in sorted((k for k in category_keys if k), key=_split_group_order):
         bare = _folded(_TRAILING_SPLIT_MARK_RE.sub("", key))
         if bare:
             keys_by_name.setdefault(bare, key)
