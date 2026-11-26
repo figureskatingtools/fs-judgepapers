@@ -189,9 +189,12 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
   text can't be split). `categoryKey` is the key in `structure` of the
   category the row belongs to, `null` when no uploaded category matches.
   `null` instead of the object when there is no schedule or it can't be
-  read; the route never fails because of it. The site marks the missing
-  rows in its file list and asks for a confirmation before generating;
-  `generate_judging_papers` itself checks nothing and takes no override.
+  read; the route never fails because of it. The site decides what a
+  `missing` row means: it notes them in its file list as not uploaded yet,
+  and only the first scheduled segment of a category with no segment papers
+  at all, skated on a day that has a `found` row, is marked missing and
+  asked about before generating. `generate_judging_papers` itself checks
+  nothing and takes no override.
 - `revoke_download_link` (**POST only**, body `{"id", "linkId"}` →
   `{"status": "revoked", "linkId"}`) marks the link's `sentemails` row
   revoked (`RevokedUtc`, `RevokedByTid`, `RevokedByOid`), so the link then

@@ -73,11 +73,14 @@ Keys are category abbreviations, values `ISU` or `MUPI`; only deviations from th
 
 The competition page marks what is missing, in the file list itself:
 
-- **A missing file** of a segment (per the table above) is a `MISSING` row in that segment.
-- **A scheduled segment with no papers.** When `CompetitionSchedule.pdf` is uploaded, every segment in it is looked up among the uploads by the category and segment FSM prints (on the schedule, as the title of the segment's `StartListwithTimes` and on line 2 of its `JudgesSheetAll`). A segment with entries and no papers is shown as a placeholder in its category, or as a category of its own when nothing of the category is uploaded. Segments with 0 entries are not expected.
-- **A category with only its calculation setup** is incomplete, with or without a schedule.
+Papers are expected only where some are uploaded. A competition is rarely uploaded in one go: a later segment's papers (a Free Skating in reverse order of the Short Program's result) can be made only once the earlier one is skated, and often only the first day exists before the competition. A category may also have a single segment.
 
-With anything missing, **Generate Papers** asks first: it lists what is missing, and the papers are generated only after ticking *Generate anyway, without the missing papers*. A segment without its panel or its time schedule is left out of the papers; any other missing sheet is simply not in the packets. The button is disabled only when no segment at all could be generated. With nothing missing, none of this is visible.
+- **A missing file.** A segment is checked once one of its files is uploaded: each file it should still have (per the table above) is a `MISSING` row in that segment. The calculation setup is expected once the category has such a segment.
+- **A scheduled segment that is not uploaded yet.** When `CompetitionSchedule.pdf` is uploaded, every segment in it is looked up among the uploads by the category and segment FSM prints (on the schedule, as the title of the segment's `StartListwithTimes` and on line 2 of its `JudgesSheetAll`). A segment with entries and no papers is a quiet grey *Not uploaded yet* note in its category, or in a grey category of its own when nothing of the category is uploaded. It is not an error, and the category keeps its green check. Segments with 0 entries are left out.
+- **A forgotten category.** The one case where the schedule marks something `MISSING`: no segment of a category has any papers (nothing uploaded, or only its calculation setup), and its first scheduled segment is skated on a day for which another category's papers are uploaded. A first segment waits for no result, so on a day that is being prepared it should be there. The category's later segments stay quiet notes, and so does a category that starts on a day nothing is uploaded for.
+- **A category with only its calculation setup** and no schedule to say when it skates is shown as *no segment papers yet*: neither an error nor a green check.
+
+With anything marked `MISSING`, **Generate Papers** asks first: it lists what is missing, and the papers are generated only after ticking *Generate anyway, without the missing papers*. A segment without its panel or its time schedule is left out of the papers; any other missing sheet is simply not in the packets. Segments that are merely not uploaded yet are never asked about. The button is disabled only when no segment at all could be generated.
 
 The check is made by the site from `GET /api/get_competition_details`, whose `scheduleCheck` lists the schedule's segments as `found`, `missing` or `notNeeded` (`null` without a readable schedule). `generate_judging_papers` itself does not refuse anything.
 
