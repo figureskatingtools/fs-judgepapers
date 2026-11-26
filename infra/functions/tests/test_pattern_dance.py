@@ -71,8 +71,10 @@ def run(tmp_path, monkeypatch):
 
         packets = {}
 
-        def merge(output_path, file_list):
+        def merge(output_path, file_list, page_counts=None):
             packets[output_path.rsplit("/", 1)[-1]] = [p.rsplit("/", 1)[-1] for p in file_list]
+            if page_counts is not None:
+                page_counts.extend(1 for _ in file_list)
             return len(file_list)
 
         monkeypatch.setattr(processor, "_get_categories_for_processor", lambda: [ICE_DANCE])

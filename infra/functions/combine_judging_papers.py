@@ -154,10 +154,19 @@ def get_panel_info(pdf_path):
         print(f"Error reading panel info from {pdf_path}: {e}")
     return panel_info
 
-def merge_pdfs(output_path, file_list):
+def merge_pdfs(output_path, file_list, page_counts=None):
+    """
+    Merge file_list into output_path; returns the merged page count.
+    page_counts, when given, is a list that gets one number per entry of
+    file_list, in order: the pages that file really put into the merge (0 for
+    a missing or unreadable one, fewer than its own when a read failed midway).
+    The papers index (custom_papers) cuts packets by these counts, so they
+    come from the merge itself, never from a second read of the files.
+    """
     writer = PdfWriter()
-    
+
     for file_path in file_list:
+        before = len(writer.pages)
         if os.path.exists(file_path):
             try:
                 reader = PdfReader(file_path)
@@ -167,7 +176,9 @@ def merge_pdfs(output_path, file_list):
                 print(f"  Error adding a file to the merge: {type(e).__name__}")
         else:
             print("  Warning: a file to merge was not found")
-            
+        if page_counts is not None:
+            page_counts.append(len(writer.pages) - before)
+
     with open(output_path, "wb") as f:
         writer.write(f)
     print(f"Created a merged PDF ({len(writer.pages)} pages)")

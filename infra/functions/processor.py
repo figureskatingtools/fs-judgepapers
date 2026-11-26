@@ -1,4 +1,6 @@
+import json
 import os
+import shutil
 import sys
 import re
 import zipfile
@@ -16,6 +18,7 @@ try:
     from .combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
     from .trainees import TRAINEE_TASKS, person_key, sanitize_trainees, separate_slug, trainee_slug
     from .trainee_sheets import stamp_trainee_sheet
+    from .custom_papers import INDEX_FILE, build_index, file_sha256
 except ImportError:
     # Fallback for local testing if not running as package
     from split_judges_sheets import split_pdf, filter_withdrawn_pages
@@ -26,6 +29,7 @@ except ImportError:
     from combined_schedule import parse_start_list, find_banner, create_combined_schedule_pdf, time_sort_key
     from trainees import TRAINEE_TASKS, person_key, sanitize_trainees, separate_slug, trainee_slug
     from trainee_sheets import stamp_trainee_sheet
+    from custom_papers import INDEX_FILE, build_index, file_sha256
 
 
 def _get_categories_for_processor():
@@ -224,6 +228,46 @@ def combined_schedule_copies(options):
     if isinstance(copies, bool) or not isinstance(copies, int):
         return 1
     return min(max(copies, 1), COMBINED_SCHEDULE_MAX_COPIES)
+
+
+def effective_options(options, prefixes):
+    """
+    The generate options as the pipeline reads them, for the papers index
+    (custom_papers): what goes before each of the segments `prefixes`, the two
+    "Papers to print" switches, the combined schedule's copies (0 = off) and
+    the trainees. Two option sets that give the same papers give the same
+    value, whatever else the client sent.
+    """
+    options = options if isinstance(options, dict) else {}
+    return {
+        'intro': {prefix: segment_intro_page(options, prefix) for prefix in sorted(prefixes)},
+        'setupEverySegment': calculation_setup_every_segment(options),
+        'patternDanceAll': pattern_dance_all_papers(options),
+        'scheduleCopies': combined_schedule_copies(options),
+        'trainees': sanitize_trainees(options.get('trainees')),
+    }
+
+
+def packet_parts(page_counts, file_count, cover_files, tasks, role_labels):
+    """
+    A packet's parts for the papers index, from the pages each merged file
+    put into it: (cover pages, [{prefix, role, label, pages, intro, flags}]),
+    the parts in packet order. tasks: [(prefix, role, first file, first file
+    after the intro page, first file after the task, flags)]. None when the
+    merge did not report a count per file: such a packet can't be cut, and
+    the run writes no index.
+    """
+    if len(page_counts) != file_count:
+        return None
+    parts = [{
+        'prefix': prefix,
+        'role': role,
+        'label': role_labels.get((prefix, role)) or role.replace("_", " ").capitalize(),
+        'pages': sum(page_counts[start:end]),
+        'intro': sum(page_counts[start:intro_end]),
+        'flags': flags,
+    } for prefix, role, start, intro_end, end, flags in tasks]
+    return sum(page_counts[:cover_files]), parts
 
 
 def build_combined_schedules(source_dir, dates, prefix_start_times, prefix_segment_names, prefix_withdrawn):
@@ -429,7 +473,96 @@ def day_summary(date_str, persons, pages, file_name, prefix_start_times, prefix_
     }
 
 
-def process_judging_papers(source_dir, output_dir, options=None):
+def write_papers_index(index_dir, output_dir, options, person_tasks, day_documents, zip_files,
+                       combined_schedules, schedule_copies, segment_panels, categories,
+                       prefix_start_times, prefix_end_times, prefix_category_names, prefix_segment_names):
+    """
+    Write the papers index of a finished run into index_dir, with a copy of
+    each day's combined schedule: per day the people of the day document in
+    its order, each with the packet's file name in the day ZIP, its pages, the
+    cover's pages and the parts (one per task: its intro page + role papers)
+    in packet order. A day is left out when it has no ZIP. Raises, writing
+    nothing, when a packet has no page count per file or the pages don't add
+    up to the day document's: an index that can't be trusted to cut by is
+    worse than none.
+    """
+    days, segments = [], {}
+    schedule_sources = {}  # date -> source path of the day's schedule
+    for date_str in sorted(day_documents):
+        if date_str not in zip_files:
+            continue
+        document = day_documents[date_str]
+        persons = person_tasks[date_str]
+        people = []
+        for slug in document['slugs']:
+            data = persons[slug]
+            cut = data.get('index_parts')
+            if cut is None:
+                raise ValueError("a packet without page counts")
+            cover_pages, parts = cut
+            if cover_pages + sum(part['pages'] for part in parts) != data['pages']:
+                raise ValueError("a packet's parts don't add up")
+            people.append({
+                'slug': slug,
+                'name': data['name'],
+                'file': f"judgingpapers_{date_str}_{slug}.pdf",
+                'pages': data['pages'],
+                'cover': cover_pages,
+                'parts': parts,
+            })
+            for part in parts:
+                prefix = part['prefix']
+                if prefix not in segments:
+                    table_category, table_segment = parse_prefix(prefix, categories)
+                    segments[prefix] = {
+                        'date': segment_panels.get(prefix, {}).get('date', date_str),
+                        'start': prefix_start_times.get(prefix),
+                        'end': prefix_end_times.get(prefix),
+                        'category': prefix_category_names.get(prefix) or table_category or prefix,
+                        'segment': prefix_segment_names.get(prefix) or table_segment or "",
+                    }
+
+        # The day document = the packets + the schedule's copies, nothing else
+        schedule = None
+        schedule_pages = document['pages'] - sum(person['pages'] for person in people)
+        if date_str in combined_schedules and schedule_copies:
+            pages = _page_count(combined_schedules[date_str])
+            if not pages or pages * schedule_copies != schedule_pages:
+                raise ValueError("the day document's pages don't add up")
+            schedule = {'file': f"combinedschedule_{date_str}.pdf", 'pages': pages, 'copies': schedule_copies}
+            schedule_sources[date_str] = combined_schedules[date_str]
+        elif schedule_pages:
+            raise ValueError("the day document's pages don't add up")
+
+        zip_path = os.path.join(output_dir, zip_files[date_str])
+        days.append({
+            'date': date_str,
+            'title': next((persons[slug]['title'] for slug in document['slugs'] if persons[slug].get('title')), ""),
+            'file': document['file'],
+            'pages': document['pages'],
+            'zip': {'file': zip_files[date_str], 'size': os.path.getsize(zip_path), 'sha256': file_sha256(zip_path)},
+            'schedule': schedule,
+            'people': people,
+        })
+
+    index = build_index(days, segments, effective_options(options, segments))
+    os.makedirs(index_dir, exist_ok=True)
+    for date_str, source in schedule_sources.items():
+        shutil.copyfile(source, os.path.join(index_dir, f"combinedschedule_{date_str}.pdf"))
+    with open(os.path.join(index_dir, INDEX_FILE), "w", encoding="utf-8") as f:
+        json.dump(index, f, ensure_ascii=False)
+    print(f"  Papers index: {len(days)} day(s), {sum(len(day['people']) for day in days)} packet(s)")
+
+
+def process_judging_papers(source_dir, output_dir, options=None, index_dir=None):
+    """
+    Build the judging papers of source_dir into output_dir (per day: the day
+    document and the ZIP of the personal packets); returns the statistics.
+    index_dir, when given, also receives the papers index of this run
+    (custom_papers.INDEX_FILE: every packet's parts with their page counts)
+    and a copy of each day's combined schedule, for Custom generate.
+    Best-effort: without it, or when it can't be written, the run is the same.
+    """
     if options is None:
         options = {}
     
@@ -750,6 +883,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
             tasks = data['tasks']  # in running order (step 2.7)
 
             file_list = []
+            task_files = []  # (prefix, role, first file, after the intro, after the task, flags)
 
             # 1. Add Cover Page
             cover_path = data.get('cover_path')
@@ -757,9 +891,12 @@ def process_judging_papers(source_dir, output_dir, options=None):
                 file_list.append(cover_path)
             else:
                 print(f"  Warning: Cover page not found for a person on {date_str}")
+            cover_files = len(file_list)
 
             # 2. Add Segment Files
             for prefix, role in tasks:
+                task_start = len(file_list)
+                task_flags = []
                 # We need to find where this prefix lives. 
                 segment_dir = source_dir
                 for r, d, f in os.walk(source_dir):
@@ -831,11 +968,14 @@ def process_judging_papers(source_dir, output_dir, options=None):
                     else:
                         file_list.append(start_list_path)
                 
+                intro_end = len(file_list)
+
                 # Role specific files
                 if (role in PATTERN_DANCE_SKIPPED_ROLES and not pattern_dance_all
                         and is_pattern_dance(prefix_segment_names.get(prefix))):
                     # Not needed for a Pattern Dance; the intro page above stays
                     pattern_dance_skipped += 1
+                    task_flags.append('patternDanceSkipped')
                 elif role == "referee":
                     # The category's calculation setup: in every segment when
                     # asked for, otherwise only in this referee's first segment
@@ -844,6 +984,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
                     if setup_every_segment or (calc_prefix, slug) not in setup_given:
                         setup_given.add((calc_prefix, slug))
                         file_list.append(os.path.join(segment_dir, f"{calc_prefix}_CalculationSetupVerificationforReferee.pdf"))
+                        task_flags.append('calculationSetup')
                     else:
                         setup_skipped += 1
 
@@ -906,13 +1047,21 @@ def process_judging_papers(source_dir, output_dir, options=None):
                         add_trainee_sheet(file_list, None)
                         print(f"  Warning: no Technical Specialist's sheets to copy for a technical trainee in {prefix}")
 
+                if role in TRAINEE_TASK_ROLES and len(file_list) == intro_end:
+                    task_flags.append('noTraineeSheet')
+                task_files.append((prefix, role, task_start, intro_end, len(file_list), task_flags))
+
             # 3. Merge and Save
             output_filename = f"judgingpapers_{date_str}_{slug}.pdf"
             output_path = os.path.join(output_dir, output_filename)
             
             print(f"  Creating a personal packet for {date_str}...")
+            page_counts = []
             data['file_list'] = file_list
-            data['pages'] = merge_pdfs(output_path, file_list) or 0
+            data['pages'] = merge_pdfs(output_path, file_list, page_counts) or 0
+            # What the packet holds, part by part, for the papers index
+            data['index_parts'] = packet_parts(page_counts, len(file_list), cover_files, task_files,
+                                               data['role_labels'])
             total_pages += data['pages']
             count += 1
 
@@ -925,6 +1074,8 @@ def process_judging_papers(source_dir, output_dir, options=None):
     # 4. Combine Daily Papers
     # ---------------------------------------------------------
     print("\n[4/5] Combining Daily Papers...")
+
+    day_documents = {}  # date -> {'file', 'pages', 'slugs' in the document's order}, for the papers index
     
     for date_str, persons in person_tasks.items():
         daily_files = []
@@ -976,11 +1127,15 @@ def process_judging_papers(source_dir, output_dir, options=None):
             merged_pages = merge_pdfs(daily_output_path, daily_files)
             if expected_pages is not None and merged_pages != expected_pages:
                 print(f"  Warning: {daily_output_filename} has {merged_pages} pages, its check block says {expected_pages}")
+            day_documents[date_str] = {'file': daily_output_filename, 'pages': merged_pages or 0,
+                                       'slugs': day_slugs}
 
     # ---------------------------------------------------------
     # 5. Zip and Cleanup
     # ---------------------------------------------------------
     print("\n[5/5] Zipping and Cleaning up...")
+
+    zip_files = {}  # date -> ZIP file name, for the papers index
     
     for date_str, persons in person_tasks.items():
         zip_filename = f"judgingPapers_{date_str}.zip"
@@ -998,6 +1153,7 @@ def process_judging_papers(source_dir, output_dir, options=None):
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                  for filepath, arcname in individual_files:
                      zipf.write(filepath, arcname)
+            zip_files[date_str] = zip_filename
             
             # Remove individual files
             print(f"  Removing {len(individual_files)} individual files...")
@@ -1008,6 +1164,18 @@ def process_judging_papers(source_dir, output_dir, options=None):
                     print(f"  Error deleting an individual file: {e.strerror}")
 
     print(f"\nDone! Created judging paper files and daily summaries in '{output_dir}'.")
+
+    # ---------------------------------------------------------
+    # 5.5 Papers index for Custom generate (best-effort, never fails the run)
+    # ---------------------------------------------------------
+    if index_dir:
+        try:
+            write_papers_index(
+                index_dir, output_dir, options, person_tasks, day_documents, zip_files,
+                combined_schedules, schedule_copies, segment_panels, categories,
+                prefix_start_times, prefix_end_times, prefix_category_names, prefix_segment_names)
+        except Exception as e:
+            print(f"  Warning: the papers index was not written ({type(e).__name__})")
 
     # ---------------------------------------------------------
     # 6. Compute usage statistics (best-effort, never raises)

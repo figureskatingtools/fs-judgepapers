@@ -106,6 +106,24 @@ A trainee follows a segment as a judge or as a technical specialist without bein
 
 The official's name stays in the copied sheets' text layer (covered on the page and in print, but found by a text search of the PDF).
 
+## Custom generate
+
+Printing only a part of the papers: the segments that were uploaded on-site, one person's packet again, or everything except the papers of a role that needs none.
+
+It works as generate → pick → cut. Every generate run also stores an index of what it made: per day the people, and for each of them their packet part by part with page counts. The site asks for it with `POST /api/get_papers_index` (`{ "id", "options" }`); when the index is not current (files, options or trainees changed since) it runs `generate_judging_papers` first. The user ticks days, people, categories, segments, roles, cover pages and combined schedules, and `POST /api/generate_custom_papers` cuts that selection out of the generated packets:
+
+```json
+{ "id": "<competition id>", "generation": "<the index's>", "contents": true,
+  "selection": { "20261107": { "schedule": false, "people": {
+      "jon_judge": { "cover": false, "parts": [["FSKWSINGLES-KJUNIW----FNL0000100--", "judge"]] } } } } }
+```
+
+- One PDF per selected day, `judgingpapers_{YYYYMMDD}_custom{N}.pdf`, with the next free number. It is a generated file like the day PDF (listed, linkable, sendable, deletable). The full day PDF and ZIP are never overwritten.
+- Every page is the full papers' own: a personal cover lists the person's whole day, and a referee's calculation setup is in the segment where the full run put it.
+- `contents` (on unless `false`) puts a contents page in front: each person in print order with their roles, segments and the pages they hold in that PDF, so a supplement is easy to split and to check.
+- The papers must be the ones the tree was drawn from: otherwise the answer is 409 `papers_changed` and nothing is written.
+- The last selection is remembered per competition and returned by `get_papers_index` as `lastSelection`.
+
 ## Branch Strategy
 
 | Branch | Environment | Purpose | Deploy trigger |

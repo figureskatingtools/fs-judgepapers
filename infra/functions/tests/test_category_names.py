@@ -108,7 +108,7 @@ def generate(tmp_path, monkeypatch):
         monkeypatch.setattr(processor, "get_panel_info", lambda path: [("judge", "Jon JUDGE", "Judge 1")])
         monkeypatch.setattr(processor, "create_segment_cover_pdf",
                             lambda path, title, dt, seg, cat, withdrawn: covers.append((title, seg, cat)))
-        monkeypatch.setattr(processor, "merge_pdfs", lambda out, files: len(files))
+        monkeypatch.setattr(processor, "merge_pdfs", lambda out, files, page_counts=None: len(files))
         stats = processor.process_judging_papers(str(src), str(tmp_path / "out"), options)
         return covers, stats
     return _generate

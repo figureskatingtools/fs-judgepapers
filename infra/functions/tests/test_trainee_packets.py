@@ -8,9 +8,12 @@ records the file lists, create_cover_pdf records its arguments. The
 end-to-end run of the real pipeline over real PDFs is in
 test_trainee_pipeline.py.
 """
+import json
+
 import pytest
 from pypdf import PdfWriter
 
+import custom_papers
 import processor
 from processor import day_summary
 from trainees import trainee_slug
@@ -50,8 +53,9 @@ def technical(name, segments):
 class Run:
     """What one process_judging_papers run produced."""
 
-    def __init__(self, packets, stats, stamps, covers, src):
+    def __init__(self, packets, stats, stamps, covers, src, index=None):
         self.packets = packets    # packet file name -> [merged file names]
+        self.index = index        # the papers index of the run (custom_papers), None when not written
         self.stats = stats
         self.stamps = stamps      # [(src name, dst name, kind, name)]
         self.covers = covers      # slug -> (name, title, [(time, label, role)]) of the personal covers
@@ -96,11 +100,17 @@ def run(tmp_path, monkeypatch):
             return path.rsplit("/", 1)[-1].split("_", 1)[0]
 
         packets, stamps, covers = {}, [], {}
+        pages_of = {}  # merged file -> its pages
 
-        def merge(output_path, file_list):
+        def merge(output_path, file_list, page_counts=None):
             packets[output_path.rsplit("/", 1)[-1]] = [p.rsplit("/", 1)[-1] for p in file_list]
             open(output_path, "wb").close()   # step 4 merges the packets that exist
-            return len(file_list)
+            # a placeholder file counts as one page, a packet as the pages merged into it
+            counts = [pages_of.get(path, 1) for path in file_list]
+            if page_counts is not None:
+                page_counts.extend(counts)
+            pages_of[output_path] = sum(counts)
+            return sum(counts)
 
         def cover(path, title, dt, name, segments=None, summary=None):
             open(path, "wb").close()
@@ -134,8 +144,12 @@ def run(tmp_path, monkeypatch):
         monkeypatch.setattr(processor, "merge_pdfs", merge)
         monkeypatch.setattr(processor, "stamp_trainee_sheet", stamp or stamp_stub)
 
-        stats = processor.process_judging_papers(str(src), str(tmp_path / f"out{count[0]}"), options)
-        return Run(packets, stats, stamps, covers, src)
+        index_dir = tmp_path / f"index{count[0]}"
+        stats = processor.process_judging_papers(str(src), str(tmp_path / f"out{count[0]}"), options,
+                                                 index_dir=str(index_dir))
+        index_file = index_dir / custom_papers.INDEX_FILE
+        index = json.loads(index_file.read_text(encoding="utf-8")) if index_file.exists() else None
+        return Run(packets, stats, stamps, covers, src, index)
 
     return _run
 

@@ -19,7 +19,8 @@ from azure.data.tables import TableClient, UpdateMode
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
-from processor import process_judging_papers
+from processor import effective_options, process_judging_papers
+import custom_papers
 from categories import (
     load_categories,
     match_category,
@@ -711,7 +712,8 @@ def _deletion_date_value(entity, clock):
 
 
 def _bump_competition_counters(comp_id, uploaded_delta=0, generate_delta=0, set_last_generated=False,
-                               email_sent_delta=0, link_created_delta=0):
+                               email_sent_delta=0, link_created_delta=0, custom_run_delta=0,
+                               custom_pages_delta=0):
     """
     Best-effort update of usage counters on the competitions entity.
     Never raises — counter failures must not fail the user's operation.
@@ -732,6 +734,10 @@ def _bump_competition_counters(comp_id, uploaded_delta=0, generate_delta=0, set_
             update["EmailSentCount"] = int(entity.get("EmailSentCount", 0)) + email_sent_delta
         if link_created_delta:
             update["LinkCreatedCount"] = int(entity.get("LinkCreatedCount", 0)) + link_created_delta
+        if custom_run_delta:
+            update["CustomGenerateRunCount"] = int(entity.get("CustomGenerateRunCount", 0)) + custom_run_delta
+        if custom_pages_delta:
+            update["CustomPagesGenerated"] = int(entity.get("CustomPagesGenerated", 0)) + custom_pages_delta
         comp_table.update_entity(update, mode=UpdateMode.MERGE)
     except Exception as e:
         logging.warning(f"Failed to update counters for competition {comp_id}: {e}")
@@ -894,12 +900,13 @@ def generate_blob_read_sas_url(blob_service_client, container_name, blob_name, s
     return f"{blob_url_base}?{sas_token}" if sas_token else None
 
 
-def store_generated_file(blob_name, competition, filename, file_size=0):
+def store_generated_file(blob_name, competition, filename, file_size=0, description=None):
     """
     Record a generated file (merged PDF / ZIP) as a generatedpapers row: its
     blob name, never a link. Download links are minted per response, after
     the access check (_generated_file_links). REPLACE, so a row written by an
     older version loses its stored 5-day SAS URL when the file is regenerated.
+    `description` replaces the default one (a custom PDF says what it holds).
     """
     try:
         table_client = get_table_client()
@@ -913,7 +920,8 @@ def store_generated_file(blob_name, competition, filename, file_size=0):
         except Exception:
              pass
 
-        desc = "Individual judge papers (ZIP)" if filename.lower().endswith('.zip') else "All judge papers (PDF)"
+        desc = description or (
+            "Individual judge papers (ZIP)" if filename.lower().endswith('.zip') else "All judge papers (PDF)")
         table_client.upsert_entity({
             "PartitionKey": competition,
             "RowKey": filename.replace('/', '_').replace('\\', '_'),
@@ -925,6 +933,123 @@ def store_generated_file(blob_name, competition, filename, file_size=0):
         logging.info(f"Recorded generated file {filename}")
     except Exception as e:
         logging.error(f"Error recording generated file: {e}")
+
+
+def _internal_blob_name(folder_path, name):
+    """
+    A blob of the record's internal folder, judgePapers/_internal/: the papers
+    index, the combined schedules a custom PDF is cut from and the last
+    custom selection. No generatedpapers row, no link, and out of
+    _record_file_name's reach; deleted with the competition's folder.
+    """
+    return f"{folder_path.strip('/')}/{GENERATED_SUBFOLDER}/{custom_papers.INTERNAL_FOLDER}/{name}"
+
+
+def _input_blobs(blobs, folder_path):
+    """
+    (record-relative name, etag) of the uploaded files a generate run reads:
+    the record's root-level blobs without metadata.json / init.md. `blobs` is
+    a listing of the record's folder.
+    """
+    prefix = f"{folder_path.strip('/')}/"
+    inputs = []
+    for blob in blobs:
+        if not blob.name.startswith(prefix):
+            continue
+        name = blob.name[len(prefix):]
+        if name and "/" not in name and name not in RECORD_CONTROL_FILES:
+            inputs.append((name, str(getattr(blob, "etag", None) or "")))
+    return inputs
+
+
+def _read_papers_index(container, folder_path):
+    """
+    The record's papers index (custom_papers.build_index), or None when it has
+    none or the blob is no usable index. A storage error is raised.
+    """
+    try:
+        raw = container.download_blob(_internal_blob_name(folder_path, custom_papers.INDEX_FILE)).readall()
+    except ResourceNotFoundError:
+        return None
+    return custom_papers.parse_index(raw)
+
+
+def _papers_index_reason(index, blobs, folder_path, options):
+    """
+    None when the index describes the papers a Generate would make right now
+    from the listed blobs with these options, else why not: `none` (no
+    index), `files` (an upload, import or delete since), `options` (other
+    options or trainees) or `outputs` (a day ZIP or a stored schedule is gone
+    or replaced).
+    """
+    if index is None:
+        return "none"
+    inputs = index.get("inputs") if isinstance(index.get("inputs"), dict) else {}
+    if inputs.get("files") != custom_papers.files_fingerprint(_input_blobs(blobs, folder_path)):
+        return "files"
+    if inputs.get("options") != custom_papers.digest(effective_options(options, index["segments"])):
+        return "options"
+    sizes = {blob.name: blob.size for blob in blobs}
+    generated = f"{folder_path.strip('/')}/{GENERATED_SUBFOLDER}/"
+    for day in index["days"]:
+        if sizes.get(generated + day["zip"]["file"]) != day["zip"]["size"]:
+            return "outputs"
+        if day.get("schedule") and _internal_blob_name(folder_path, day["schedule"]["file"]) not in sizes:
+            return "outputs"
+    return None
+
+
+def _delete_papers_index(container, folder_path):
+    """Remove the papers index before its papers are replaced (best-effort)."""
+    try:
+        container.delete_blob(_internal_blob_name(folder_path, custom_papers.INDEX_FILE))
+    except ResourceNotFoundError:
+        pass
+    except Exception as e:
+        logging.warning(f"Could not remove the old papers index: {type(e).__name__}")
+
+
+def _store_papers_index(container, folder_path, index_dir, blobs):
+    """
+    Upload what the processor left in index_dir: the day's combined schedules,
+    then the index itself, last, completed with a new `generation` id, the
+    time and the fingerprint of the inputs (`blobs`: the listing the run
+    downloaded from). Schedules of earlier runs that the new index doesn't
+    name are removed. Best-effort: without an index Custom generate simply
+    generates again.
+    """
+    try:
+        path = os.path.join(index_dir, custom_papers.INDEX_FILE)
+        if not os.path.exists(path):
+            return
+        with open(path, "rb") as f:
+            index = custom_papers.parse_index(f.read())
+        if index is None:
+            return
+        keep = set()
+        for day in index["days"]:
+            if day.get("schedule"):
+                name = _internal_blob_name(folder_path, day["schedule"]["file"])
+                keep.add(name)
+                with open(os.path.join(index_dir, day["schedule"]["file"]), "rb") as data:
+                    container.upload_blob(name=name, data=data, overwrite=True)
+        stale_prefix = _internal_blob_name(folder_path, "combinedschedule_")
+        for blob in blobs:
+            if blob.name.startswith(stale_prefix) and blob.name not in keep:
+                try:
+                    container.delete_blob(blob.name)
+                except Exception:
+                    pass
+        index["generation"] = uuid4().hex
+        index["generatedUtc"] = _iso_utc(datetime.now(timezone.utc))
+        index["inputs"] = {
+            "files": custom_papers.files_fingerprint(_input_blobs(blobs, folder_path)),
+            "options": custom_papers.digest(index.get("options")),
+        }
+        container.upload_blob(name=_internal_blob_name(folder_path, custom_papers.INDEX_FILE),
+                              data=json.dumps(index, ensure_ascii=False).encode("utf-8"), overwrite=True)
+    except Exception as e:
+        logging.warning(f"The papers index was not stored: {type(e).__name__}")
 
 
 def _generated_blob_name(paper, folder_path):
@@ -2309,11 +2434,11 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
 
         # Download files
         logging.info(f"Downloading files from {working_folder}...")
-        blobs = container_client.list_blobs(name_starts_with=working_folder)
+        clean_working_folder = working_folder.strip("/")
+        blobs = list(container_client.list_blobs(name_starts_with=working_folder))
         download_count = 0
         for blob in blobs:
             # Calculate relative path to maintain structure inside the working folder
-            clean_working_folder = working_folder.strip("/")
             if blob.name.startswith(clean_working_folder + "/"):
                 relative_path = blob.name[len(clean_working_folder)+1:]
             elif blob.name == clean_working_folder:
@@ -2322,6 +2447,11 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
                 if not blob.name.startswith(clean_working_folder + "/"):
                     continue
                 relative_path = blob.name[len(clean_working_folder)+1:]
+
+            # Its own earlier output (day PDFs, ZIPs, custom PDFs, the papers
+            # index) is never an input of a run
+            if relative_path.startswith(f"{GENERATED_SUBFOLDER}/"):
+                continue
 
             local_path = os.path.join(source_dir, relative_path)
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -2337,7 +2467,13 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
 
         # Run the processor
         logging.info("Running processor...")
-        stats = process_judging_papers(source_dir, output_dir, options=options)
+        index_dir = os.path.join(temp_dir, "internal")
+        stats = process_judging_papers(source_dir, output_dir, options=options, index_dir=index_dir)
+
+        # The papers index describes the files about to be replaced: it goes
+        # first and the new one is written last, so an index never stands
+        # next to other papers than its own
+        _delete_papers_index(container_client, clean_working_folder)
 
         # Upload results
         logging.info("Uploading results...")
@@ -2363,6 +2499,8 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
 
         logging.info(f"Uploaded {upload_count} files.")
 
+        _store_papers_index(container_client, clean_working_folder, index_dir, blobs)
+
         _bump_competition_counters(comp_id, generate_delta=1, set_last_generated=True)
         _store_competition_statistics(comp_id, stats or {})
 
@@ -2376,6 +2514,264 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
         # Cleanup
         if 'temp_dir' in locals() and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
+
+
+# --- Custom generate (issue #85): pick a part of the generated papers ---------
+
+PAPERS_CHANGED = "papers_changed: the papers were generated again or changed; open Custom generate again"
+_CUSTOM_FILE_RE = re.compile(r"judgingpapers_(\d{8})_custom(\d+)\.pdf")
+CUSTOM_NAME_ATTEMPTS = 20
+
+
+def _counted(amount, one, many):
+    """'1 packet', '12 packets'."""
+    return f"{amount} {one if amount == 1 else many}"
+
+
+def _json_object(req):
+    """The request body as a JSON object, or None."""
+    try:
+        body = req.get_json()
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _read_last_selection(container, folder_path):
+    """
+    The last custom selection of the record, `{savedUtc, pages, selection}`,
+    or None. Best-effort: it only feeds the "Last selection" buttons, so an
+    unreadable one is no selection.
+    """
+    try:
+        raw = container.download_blob(_internal_blob_name(folder_path, custom_papers.SELECTION_FILE)).readall()
+        last = json.loads(raw)
+    except ResourceNotFoundError:
+        return None
+    except Exception as e:
+        logging.warning(f"Could not read the last custom selection: {type(e).__name__}")
+        return None
+    return last if isinstance(last, dict) and isinstance(last.get("selection"), dict) else None
+
+
+@app.route(route="get_papers_index", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def get_papers_index(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Custom generate, first step: `{id, options}` -> `{current, reason, index,
+    lastSelection, refreshedFromPool}`. `current` says whether the stored
+    papers index describes the papers a Generate with these options would
+    make right now (_papers_index_reason); only then `index` holds the tree's
+    data (custom_papers.client_index), otherwise it is null and the site runs
+    generate_judging_papers first. Nothing is generated here. Write access:
+    the index only serves generate_custom_papers.
+    """
+    caller = get_caller(req)
+    if not caller:
+        return func.HttpResponse("Unauthorized", status_code=401)
+    if not is_user_allowed(caller):
+        return func.HttpResponse("Forbidden: You are not on the allow list.", status_code=403)
+
+    body = _json_object(req)
+    if body is None:
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    comp_id = body.get("id")
+    if not comp_id:
+        return func.HttpResponse("Please pass the competition id", status_code=400)
+    options = dict(body["options"]) if isinstance(body.get("options"), dict) else {}
+
+    entity, denied = _competition_for(caller, comp_id, "write")
+    if denied is not None:
+        return denied
+    folder_path = entity.get("FolderPath", entity["RowKey"]).strip("/")
+
+    try:
+        blob_service_client = get_blob_service_client()
+        if not blob_service_client:
+            return func.HttpResponse("Storage configuration not found", status_code=500)
+        container = blob_service_client.get_container_client(GENERATED_CONTAINER)
+
+        # The trainees are part of the papers, and metadata.json is their only
+        # source (as in generate): unreadable = no answer, never "no trainees"
+        try:
+            meta, _etag = _load_competition_metadata(container, folder_path)
+        except Exception as e:
+            logging.error(f"Could not read metadata.json of {comp_id}: {type(e).__name__}")
+            return func.HttpResponse(METADATA_UNAVAILABLE, status_code=503)
+        options["trainees"] = sanitize_trainees((meta or {}).get("trainees"))
+
+        # Like generate and details: a newer FSM export in the pool replaces
+        # the tool's copy first, and then the index is no longer current
+        refreshed = _refresh_from_pool(entity, container, folder_path)
+        try:
+            blobs = list(container.list_blobs(name_starts_with=f"{folder_path}/"))
+            index = _read_papers_index(container, folder_path)
+        except Exception as e:
+            logging.error(f"Could not read the papers index of {comp_id}: {type(e).__name__}")
+            return func.HttpResponse(METADATA_UNAVAILABLE, status_code=503)
+
+        reason = _papers_index_reason(index, blobs, folder_path, options)
+        return func.HttpResponse(json.dumps({
+            "current": reason is None,
+            "reason": reason,
+            "index": custom_papers.client_index(index) if reason is None else None,
+            "lastSelection": _read_last_selection(container, folder_path),
+            "refreshedFromPool": refreshed,
+        }), mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Error reading the papers index: {type(e).__name__}", exc_info=True)
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.route(route="generate_custom_papers", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def generate_custom_papers(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Custom generate, last step: `{id, generation, selection, contents}` ->
+    `{files: [{fileName, url, description, expiration, size, date, packets,
+    segments, pages}]}`. Cuts the selection (custom_papers.validate_selection)
+    out of the generated packets, one PDF per selected day,
+    `judgingpapers_{YYYYMMDD}_custom{N}.pdf` with the next free N: nothing is
+    overwritten, and the full day PDF and ZIP are not touched. `generation` is
+    the index's id the site drew its tree from; another index, or papers that
+    are not the index's, is a 409 `papers_changed` and nothing is written.
+    `contents` (default on; only a JSON false turns it off) puts the contents
+    page in front. The statistics snapshot is a full run's and stays.
+    """
+    caller = get_caller(req)
+    if not caller:
+        return func.HttpResponse("Unauthorized", status_code=401)
+    if not is_user_allowed(caller):
+        return func.HttpResponse("Forbidden: You are not on the allow list.", status_code=403)
+
+    if len(req.get_body() or b"") > custom_papers.MAX_REQUEST_BYTES:
+        return func.HttpResponse("The selection is too large", status_code=413)
+    body = _json_object(req)
+    if body is None:
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    comp_id = body.get("id")
+    if not comp_id:
+        return func.HttpResponse("Please pass the competition id", status_code=400)
+    generation = body.get("generation")
+    with_contents = body.get("contents") is not False
+
+    entity, denied = _competition_for(caller, comp_id, "write")
+    if denied is not None:
+        return denied
+    folder_path = entity.get("FolderPath", entity["RowKey"]).strip("/")
+    generated_prefix = f"{folder_path}/{GENERATED_SUBFOLDER}/"
+
+    temp_dir = None
+    try:
+        blob_service_client = get_blob_service_client()
+        if not blob_service_client:
+            return func.HttpResponse("Storage configuration not found", status_code=500)
+        container = blob_service_client.get_container_client(GENERATED_CONTAINER)
+
+        try:
+            index = _read_papers_index(container, folder_path)
+        except Exception as e:
+            logging.error(f"Could not read the papers index of {comp_id}: {type(e).__name__}")
+            return func.HttpResponse(METADATA_UNAVAILABLE, status_code=503)
+        if index is None or not isinstance(generation, str) or index.get("generation") != generation:
+            return func.HttpResponse(PAPERS_CHANGED, status_code=409)
+
+        try:
+            chosen = custom_papers.validate_selection(index, body.get("selection"))
+        except custom_papers.SelectionError as e:
+            return func.HttpResponse(f"Invalid selection: {e}", status_code=400)
+        plans = custom_papers.plan_cut(index, chosen)
+        if not plans:
+            return func.HttpResponse("Invalid selection: nothing with pages is selected", status_code=400)
+
+        # Cut every day before anything is uploaded: a day that turns out to
+        # have changed leaves no half of a custom run behind
+        temp_dir = tempfile.mkdtemp()
+        cut = []
+        for plan in plans:
+            date = plan["date"]
+            zip_path = os.path.join(temp_dir, f"{date}.zip")
+            schedule_path = os.path.join(temp_dir, f"{date}-schedule.pdf") if plan["schedule"] else None
+            try:
+                with open(zip_path, "wb") as f:
+                    container.download_blob(generated_prefix + plan["zip"]["file"]).readinto(f)
+                if schedule_path:
+                    with open(schedule_path, "wb") as f:
+                        container.download_blob(
+                            _internal_blob_name(folder_path, plan["schedule"]["file"])).readinto(f)
+            except ResourceNotFoundError:
+                return func.HttpResponse(PAPERS_CHANGED, status_code=409)
+            if custom_papers.file_sha256(zip_path) != plan["zip"]["sha256"]:
+                return func.HttpResponse(PAPERS_CHANGED, status_code=409)
+
+            contents_path = None
+            if with_contents:
+                contents_path = os.path.join(temp_dir, f"{date}-contents.pdf")
+                custom_papers.create_contents_pdf(contents_path, index, plan)
+            output_path = os.path.join(temp_dir, f"{date}-custom.pdf")
+            try:
+                pages = custom_papers.cut_day(zip_path, schedule_path, plan, output_path, contents_path)
+            except custom_papers.PapersChanged:
+                return func.HttpResponse(PAPERS_CHANGED, status_code=409)
+            cut.append((plan, output_path, pages))
+            os.remove(zip_path)
+
+        # Upload under the next free number of the day; never over a file
+        taken = {}
+        for blob in container.list_blobs(name_starts_with=generated_prefix):
+            match = _CUSTOM_FILE_RE.fullmatch(blob.name[len(generated_prefix):])
+            if match:
+                taken[match.group(1)] = max(taken.get(match.group(1), 0), int(match.group(2)))
+        papers, details = [], []
+        for plan, output_path, pages in cut:
+            number = taken.get(plan["date"], 0) + 1
+            for _attempt in range(CUSTOM_NAME_ATTEMPTS):
+                file_name = f"judgingpapers_{plan['date']}_custom{number}.pdf"
+                try:
+                    with open(output_path, "rb") as data:
+                        container.upload_blob(name=generated_prefix + file_name, data=data, overwrite=False)
+                    break
+                except ResourceExistsError:
+                    number += 1
+            else:
+                return func.HttpResponse("Could not name the custom PDF, try again", status_code=409)
+
+            packets = len(plan["people"])
+            description = (f"Custom papers {number}: {_counted(packets, 'packet', 'packets')}, "
+                           f"{_counted(plan['segments'], 'segment', 'segments')}, "
+                           f"{_counted(pages, 'page', 'pages')} (PDF)")
+            size = os.path.getsize(output_path)
+            store_generated_file(generated_prefix + file_name, comp_id, file_name, size, description=description)
+            papers.append({"BlobName": generated_prefix + file_name, "FileName": file_name,
+                           "Description": description, "FileSize": size})
+            details.append({"date": plan["date"], "packets": packets, "segments": plan["segments"], "pages": pages})
+
+        total_pages = sum(detail["pages"] for detail in details)
+        # The last selection, for "Last selection" / "Not in last selection"
+        try:
+            container.upload_blob(
+                name=_internal_blob_name(folder_path, custom_papers.SELECTION_FILE),
+                data=json.dumps({
+                    "savedUtc": _iso_utc(datetime.now(timezone.utc)),
+                    "pages": total_pages,
+                    "selection": custom_papers.selection_json(chosen),
+                }, ensure_ascii=False).encode("utf-8"),
+                overwrite=True)
+        except Exception as e:
+            logging.warning(f"The custom selection was not stored: {type(e).__name__}")
+        _bump_competition_counters(comp_id, custom_run_delta=1, custom_pages_delta=total_pages)
+        logging.info(f"Custom papers of {comp_id}: {len(papers)} file(s), {total_pages} page(s)")
+
+        links = _generated_file_links(blob_service_client, entity, papers)
+        return func.HttpResponse(
+            json.dumps({"files": [dict(link, **detail) for link, detail in zip(links, details)]}),
+            mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Error creating custom papers: {type(e).__name__}", exc_info=True)
+        return func.HttpResponse("Error processing request. Check server logs for details.", status_code=500)
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+
 def _sends_in_last_day(sent_table, email):
     """Number of e-mails this user sent in the last 24 h (any competition).
     Copied links (Channel "link") have their own limit and don't count here."""
