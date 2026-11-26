@@ -980,7 +980,8 @@ def _papers_index_reason(index, blobs, folder_path, options):
     from the listed blobs with these options, else why not: `none` (no
     index), `files` (an upload, import or delete since), `options` (other
     options or trainees) or `outputs` (a day ZIP or a stored schedule is gone
-    or replaced).
+    or is not the blob version the index was written for: its ETag differs,
+    whatever its size, e.g. after an overlapping generate run).
     """
     if index is None:
         return "none"
@@ -989,14 +990,33 @@ def _papers_index_reason(index, blobs, folder_path, options):
         return "files"
     if inputs.get("options") != custom_papers.digest(effective_options(options, index["segments"])):
         return "options"
-    sizes = {blob.name: blob.size for blob in blobs}
+    etags = {blob.name: _plain_etag(getattr(blob, "etag", None)) for blob in blobs}
     generated = f"{folder_path.strip('/')}/{GENERATED_SUBFOLDER}/"
     for day in index["days"]:
-        if sizes.get(generated + day["zip"]["file"]) != day["zip"]["size"]:
-            return "outputs"
-        if day.get("schedule") and _internal_blob_name(folder_path, day["schedule"]["file"]) not in sizes:
-            return "outputs"
+        stored = [(generated + day["zip"]["file"], day["zip"].get("etag"))]
+        if day.get("schedule"):
+            stored.append((_internal_blob_name(folder_path, day["schedule"]["file"]), day["schedule"].get("etag")))
+        for name, etag in stored:
+            if not etag or etags.get(name) != etag:
+                return "outputs"
     return None
+
+
+def _plain_etag(etag):
+    """An ETag without its quotes: an upload answers `"0x8D…"`, a listing may give `0x8D…`."""
+    return str(etag or "").strip().strip('"')
+
+
+def _upload_blob_etag(container, name, data):
+    """
+    Upload a blob (replacing it) and return the ETag of exactly this write, as
+    the upload answered it: what a later listing must still show for the blob
+    to be the one this run wrote.
+    """
+    blob = container.get_blob_client(name)
+    answer = blob.upload_blob(data, overwrite=True)
+    etag = answer.get("etag") if isinstance(answer, dict) else None
+    return _plain_etag(etag or blob.get_blob_properties().etag)
 
 
 def _delete_papers_index(container, folder_path):
@@ -1009,14 +1029,17 @@ def _delete_papers_index(container, folder_path):
         logging.warning(f"Could not remove the old papers index: {type(e).__name__}")
 
 
-def _store_papers_index(container, folder_path, index_dir, blobs):
+def _store_papers_index(container, folder_path, index_dir, blobs, output_etags):
     """
     Upload what the processor left in index_dir: the day's combined schedules,
     then the index itself, last, completed with a new `generation` id, the
-    time and the fingerprint of the inputs (`blobs`: the listing the run
-    downloaded from). Schedules of earlier runs that the new index doesn't
-    name are removed. Best-effort: without an index Custom generate simply
-    generates again.
+    time, the fingerprint of the inputs (`blobs`: the listing the run
+    downloaded from) and the ETag of every day ZIP (`output_etags`: file name
+    -> ETag of this run's upload) and schedule it describes. So when another
+    run's upload lands in between, the index does not match the blobs and is
+    simply not current (_papers_index_reason). Schedules of earlier runs that
+    the new index doesn't name are removed. Best-effort: without an index
+    Custom generate simply generates again.
     """
     try:
         path = os.path.join(index_dir, custom_papers.INDEX_FILE)
@@ -1028,11 +1051,12 @@ def _store_papers_index(container, folder_path, index_dir, blobs):
             return
         keep = set()
         for day in index["days"]:
+            day["zip"]["etag"] = _plain_etag(output_etags.get(day["zip"]["file"]))
             if day.get("schedule"):
                 name = _internal_blob_name(folder_path, day["schedule"]["file"])
                 keep.add(name)
                 with open(os.path.join(index_dir, day["schedule"]["file"]), "rb") as data:
-                    container.upload_blob(name=name, data=data, overwrite=True)
+                    day["schedule"]["etag"] = _upload_blob_etag(container, name, data)
         stale_prefix = _internal_blob_name(folder_path, "combinedschedule_")
         for blob in blobs:
             if blob.name.startswith(stale_prefix) and blob.name not in keep:
@@ -2478,6 +2502,7 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
         # Upload results
         logging.info("Uploading results...")
         upload_count = 0
+        output_etags = {}  # file name -> ETag of this run's upload, for the papers index
         for root, dirs, files in os.walk(output_dir):
             for file in files:
                 local_file_path = os.path.join(root, file)
@@ -2490,7 +2515,7 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
                 file_size = os.path.getsize(local_file_path)
 
                 with open(local_file_path, "rb") as data:
-                    container_client.upload_blob(name=blob_name, data=data, overwrite=True)
+                    output_etags[relative_path] = _upload_blob_etag(container_client, blob_name, data)
                 upload_count += 1
                 
                 # Check for generate files (PDF summaries or ZIPs)
@@ -2499,7 +2524,7 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
 
         logging.info(f"Uploaded {upload_count} files.")
 
-        _store_papers_index(container_client, clean_working_folder, index_dir, blobs)
+        _store_papers_index(container_client, clean_working_folder, index_dir, blobs, output_etags)
 
         _bump_competition_counters(comp_id, generate_delta=1, set_last_generated=True)
         _store_competition_statistics(comp_id, stats or {})
@@ -2699,7 +2724,11 @@ def generate_custom_papers(req: func.HttpRequest) -> func.HttpResponse:
                             _internal_blob_name(folder_path, plan["schedule"]["file"])).readinto(f)
             except ResourceNotFoundError:
                 return func.HttpResponse(PAPERS_CHANGED, status_code=409)
+            # The bytes must be the index's: a ZIP or a schedule replaced
+            # meanwhile (another run) would be cut by the wrong page numbers
             if custom_papers.file_sha256(zip_path) != plan["zip"]["sha256"]:
+                return func.HttpResponse(PAPERS_CHANGED, status_code=409)
+            if schedule_path and custom_papers.file_sha256(schedule_path) != plan["schedule"]["sha256"]:
                 return func.HttpResponse(PAPERS_CHANGED, status_code=409)
 
             contents_path = None

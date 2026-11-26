@@ -73,7 +73,7 @@ def build_index(days, segments, options):
 
       {version, options, segments: {prefix: {date, start, end, category, segment}},
        days: [{date, title, file, pages, zip: {file, size, sha256},
-               schedule: {file, pages, copies} | None,
+               schedule: {file, pages, copies, size, sha256} | None,
                people: [{slug, name, file, pages, cover,
                          parts: [{prefix, role, label, pages, intro, flags}]}]}]}
 
@@ -82,7 +82,9 @@ def build_index(days, segments, options):
     cover + the parts' pages = the packet's pages, and the packets + the
     schedule's copies = the day document's pages. `options` are the
     processor's effective_options, hashed into the fingerprint.
-    function_app adds `generation`, `generatedUtc` and `inputs` on upload.
+    function_app adds `generation`, `generatedUtc`, `inputs` and, to each
+    zip and schedule, the `etag` its upload answered: the index describes
+    exactly those blob versions (a hash for the bytes, an ETag for the blob).
     """
     return {"version": INDEX_VERSION, "options": options, "segments": segments, "days": days}
 
@@ -138,6 +140,7 @@ def parse_index(raw):
             return None
         if schedule is not None and not (
                 isinstance(schedule, dict) and _is_file_name(schedule.get("file"))
+                and isinstance(schedule.get("sha256"), str)
                 and _is_count(schedule.get("pages")) and _is_count(schedule.get("copies"))):
             return None
         if not isinstance(people, list) or not _is_count(day.get("pages")):

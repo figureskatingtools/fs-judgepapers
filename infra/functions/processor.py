@@ -529,7 +529,9 @@ def write_papers_index(index_dir, output_dir, options, person_tasks, day_documen
             pages = _page_count(combined_schedules[date_str])
             if not pages or pages * schedule_copies != schedule_pages:
                 raise ValueError("the day document's pages don't add up")
-            schedule = {'file': f"combinedschedule_{date_str}.pdf", 'pages': pages, 'copies': schedule_copies}
+            schedule = {'file': f"combinedschedule_{date_str}.pdf", 'pages': pages, 'copies': schedule_copies,
+                        'size': os.path.getsize(combined_schedules[date_str]),
+                        'sha256': file_sha256(combined_schedules[date_str])}
             schedule_sources[date_str] = combined_schedules[date_str]
         elif schedule_pages:
             raise ValueError("the day document's pages don't add up")

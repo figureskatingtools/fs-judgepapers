@@ -11,6 +11,7 @@ import os
 
 import pytest
 from pypdf import PdfReader
+from reportlab.pdfgen import canvas
 
 import custom_papers
 import function_app as fa
@@ -88,6 +89,17 @@ def stored(blobs):
     return {name: (blob.data, blob.etag) for name, blob in blobs.blobs.items()}
 
 
+def another_schedule(blobs):
+    """Another run's schedule in the stored one's place: as many pages, other bytes."""
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer)
+    for line in ("other 1", "other 2"):
+        c.drawString(72, 720, line)
+        c.showPage()
+    c.save()
+    blobs.upload_blob(SCHEDULE_BLOB, buffer.getvalue(), overwrite=True)
+
+
 # --- generate stores the index ---------------------------------------------------
 
 def test_generate_stores_the_index_next_to_its_papers(competition, blobs, tables):
@@ -102,8 +114,13 @@ def test_generate_stores_the_index_next_to_its_papers(competition, blobs, tables
             (name, blobs.blobs[f"{FOLDER}/{name}"].etag) for name in SOURCES),
         "options": custom_papers.digest(index["options"]),
     }
-    assert index["days"][0]["zip"]["size"] == len(blobs.blobs[ZIP_BLOB].data)
-    assert SCHEDULE_BLOB in blobs.blobs
+    day = index["days"][0]
+    assert day["zip"]["size"] == len(blobs.blobs[ZIP_BLOB].data)
+    # the index names the very blob versions this run wrote
+    assert day["zip"]["etag"] == blobs.blobs[ZIP_BLOB].etag.strip('"')
+    assert day["schedule"]["etag"] == blobs.blobs[SCHEDULE_BLOB].etag.strip('"')
+    assert day["schedule"]["size"] == len(blobs.blobs[SCHEDULE_BLOB].data)
+    assert len(day["schedule"]["sha256"]) == 64
     # internal blobs are no generated files
     assert sorted(key[1] for key in tables["generatedpapers"].rows) == [
         f"judgingPapers_{DATE}.zip", f"judgingpapers_{DATE}.pdf"]
@@ -200,7 +217,11 @@ def test_right_after_a_generate_the_index_is_current(competition):
     (lambda blobs: blobs.delete_blob(f"{FOLDER}/{SOURCES[1]}"), "files"),
     (lambda blobs: blobs.delete_blob(ZIP_BLOB), "outputs"),
     (lambda blobs: blobs.upload_blob(ZIP_BLOB, b"another zip", overwrite=True), "outputs"),
+    # written again, even with the same bytes and size: not the blob the index was made for
+    (lambda blobs: blobs.upload_blob(ZIP_BLOB, blobs.blobs[ZIP_BLOB].data, overwrite=True), "outputs"),
+    (lambda blobs: blobs.upload_blob(ZIP_BLOB, bytes(len(blobs.blobs[ZIP_BLOB].data)), overwrite=True), "outputs"),
     (lambda blobs: blobs.delete_blob(SCHEDULE_BLOB), "outputs"),
+    (another_schedule, "outputs"),
     (lambda blobs: blobs.upload_blob(INDEX_BLOB, b"{}", overwrite=True), "none"),
     (lambda blobs: blobs.upload_blob(
         f"{FOLDER}/metadata.json", json.dumps({"id": COMP_ID, "trainees": TRAINEES}), overwrite=True), "options"),
@@ -452,6 +473,7 @@ def test_no_index_is_refused(competition, blobs, tables):
     lambda blobs: blobs.upload_blob(ZIP_BLOB, blobs.blobs[ZIP_BLOB].data + b" ", overwrite=True),
     lambda blobs: blobs.delete_blob(ZIP_BLOB),
     lambda blobs: blobs.delete_blob(SCHEDULE_BLOB),
+    another_schedule,    # as many pages: only its bytes tell
 ])
 def test_papers_that_are_not_the_index_s_are_refused(competition, blobs, tables, damage):
     generate()
@@ -459,6 +481,22 @@ def test_papers_that_are_not_the_index_s_are_refused(competition, blobs, tables,
     damage(blobs)
 
     refused(blobs, tables, custom(everything(index), generation=index["generation"]), 409, fa.PAPERS_CHANGED)
+
+
+def test_an_overlapping_run_never_leaves_an_index_that_passes_for_current(competition, blobs, tables):
+    # another run's ZIP lands after this run's ZIP and before this run's index
+    def other_run(name):
+        if name == INDEX_BLOB:
+            blobs.before_upload = None
+            blobs.upload_blob(ZIP_BLOB, b"the other run's zip", overwrite=True)
+
+    blobs.before_upload = other_run
+    generate()
+
+    body = payload(index_state())
+    assert (body["current"], body["reason"], body["index"]) == (False, "outputs", None)
+    # and nothing is cut by it
+    refused(blobs, tables, custom({DATE: {"schedule": True}}), 409, fa.PAPERS_CHANGED)
 
 
 def test_a_changed_second_day_leaves_no_file_of_the_first(competition, blobs, tables):

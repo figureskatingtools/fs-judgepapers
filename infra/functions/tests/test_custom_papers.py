@@ -82,9 +82,10 @@ def make_papers(output_dir, index_dir, options=None, days=None, schedule=True):
         entry, copies = None, []
         if schedule:
             entry = {"file": f"combinedschedule_{date}.pdf", "pages": SCHEDULE_PAGES, "copies": SCHEDULE_COPIES}
-            text_pdf(os.path.join(index_dir, entry["file"]),
-                     [f"schedule {n}" for n in range(1, SCHEDULE_PAGES + 1)])
-            copies = [os.path.join(index_dir, entry["file"])] * SCHEDULE_COPIES
+            schedule_path = os.path.join(index_dir, entry["file"])
+            text_pdf(schedule_path, [f"schedule {n}" for n in range(1, SCHEDULE_PAGES + 1)])
+            entry.update(size=os.path.getsize(schedule_path), sha256=custom_papers.file_sha256(schedule_path))
+            copies = [schedule_path] * SCHEDULE_COPIES
         day_file = f"judgingpapers_{date}.pdf"
         day_pages = merge_pdfs(os.path.join(output_dir, day_file), packets + copies)
         for path in packets:
@@ -116,6 +117,10 @@ def seed_papers(container, folder, tmp_path, generation="ab" * 16, **kw):
             container.upload_blob(f"{prefix}/{path.name}", path.read_bytes(), overwrite=True)
     index.update(generation=generation, generatedUtc="2026-11-07T08:00:00Z",
                  inputs={"files": "", "options": custom_papers.digest(index["options"])})
+    for day in index["days"]:   # the blob versions the index describes
+        day["zip"]["etag"] = container.blobs[f"{folder}/judgePapers/{day['zip']['file']}"].etag.strip('"')
+        if day["schedule"]:
+            day["schedule"]["etag"] = container.blobs[f"{prefix}/{day['schedule']['file']}"].etag.strip('"')
     container.upload_blob(f"{prefix}/{custom_papers.INDEX_FILE}", json.dumps(index).encode("utf-8"), overwrite=True)
     return index
 
@@ -176,6 +181,7 @@ def test_an_index_reads_back_and_its_pages_add_up(papers):
     lambda index: index["days"][0]["people"][0]["parts"][0].update(prefix="GONE"),
     lambda index: index["days"][0]["people"][0]["parts"][0].update(pages=True),
     lambda index: index["days"][0].update(schedule={"file": "x.pdf"}),
+    lambda index: index["days"][0]["schedule"].pop("sha256"),
     # the names an index gives are opened as they are: never a path
     lambda index: index["days"][0]["zip"].update(file="../other-record/judgePapers/x.zip"),
     lambda index: index["days"][0]["schedule"].update(file="../metadata.json"),
