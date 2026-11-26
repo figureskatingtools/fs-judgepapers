@@ -152,6 +152,41 @@ def test_the_categories_table_is_the_last_resort_for_a_split():
     assert [(r["category_name"], r["segment_name"]) for r in rows] == [("Gaala", "Näytös")]
 
 
+def one_row(category, segment, table):
+    """(category, segment) of a single row drawn as one string, split with `table`."""
+    rows = parse(make_schedule(
+        [("12.09.2026", [("10:00:00", "10:30:00", 6, category, segment)])], single_spaced=True), table)
+    return [(r["category_name"], r["segment_name"]) for r in rows]
+
+
+def test_the_table_split_knows_the_finnish_name_and_keeps_the_printed_text():
+    # The schedule prints the competition's own language, in its own spelling
+    table = [{"displayName": "Chicks, Girls", "displayNameFi": "A-Silmut, Tytöt"}]
+    assert one_row("A-SILMUT Tytöt", "Näytös", table) == [("A-SILMUT Tytöt", "Näytös")]
+    assert one_row("CHICKS GIRLS", "Näytös", table) == [("CHICKS GIRLS", "Näytös")]
+
+
+def test_the_table_split_takes_the_longest_name_on_a_word_boundary():
+    table = [{"displayName": "Adults", "displayNameFi": "Aikuiset"},
+             {"displayName": "Adult Women", "displayNameFi": "Aikuiset Naiset"}]
+    assert one_row("AIKUISET NAISET", "Näytös", table) == [("AIKUISET NAISET", "Näytös")]
+    assert one_row("Aikuiset", "Näytös", table) == [("Aikuiset", "Näytös")]
+    # "Aikuiset" is not the start of another word
+    assert one_row("Aikuisetkin", "Näytös", table) == [("", "Aikuisetkin Näytös")]
+
+
+def test_the_table_split_keeps_a_split_group_mark_with_the_category():
+    table = [{"displayName": "Gala", "displayNameFi": "Gaala"}]
+    assert one_row("Gaala #2", "Näytös", table) == [("Gaala #2", "Näytös")]
+
+
+def test_a_category_name_with_nothing_after_it_is_not_a_split():
+    table = [{"displayName": "Gala", "displayNameFi": "Gaala"}]
+    rows = parse(make_schedule(
+        [("12.09.2026", [("10:00:00", "10:30:00", 6, "Gaala", "")])]), table)
+    assert [(r["category_name"], r["segment_name"]) for r in rows] == [("", "Gaala")]
+
+
 @pytest.mark.parametrize("data", [b"", b"not a pdf", b"%PDF-1.4"])
 def test_an_unreadable_schedule_gives_no_rows(data):
     assert parse(data) == []

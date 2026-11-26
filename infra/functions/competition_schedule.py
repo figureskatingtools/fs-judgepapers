@@ -19,8 +19,10 @@ import logging
 from pypdf import PdfReader
 
 try:
+    from .categories import _SPLIT_MARK_RE, _folded, _name_end
     from .combined_schedule import split_title
 except ImportError:
+    from categories import _SPLIT_MARK_RE, _folded, _name_end
     from combined_schedule import split_title
 
 
@@ -148,46 +150,29 @@ def _normalize_time(time_str):
 
 def _split_event_name(event_name, categories):
     """
-    Split a full event name like "Advanced Novice Ice Dance PDK1 (Starlight Waltz)"
-    into category_name="Advanced Novice Ice Dance" and segment_name="PDK1 (Starlight Waltz)".
-
-    Uses the categories table displayName values for longest-match.
-    Falls back to returning ("", event_name) if no match found.
+    Last resort for a row that came out as one string and does not end in a
+    known segment name: split it after the longest categories-table name it
+    starts with. Both of a row's names count (`displayName`, `displayNameFi`),
+    since the schedule prints the competition's own language, and they are
+    compared like line 2 of the judges' sheets (categories._name_end: case,
+    spacing and punctuation ignored, on a word boundary). The table only
+    locates the split: both parts are returned as the schedule prints them, a
+    split group's `#N` included. ("", event_name) when no name fits or
+    nothing follows it.
     """
-    if not categories:
-        return "", event_name
-
-    # Build a list of (displayName, length) sorted by length descending
-    # for longest-match-first strategy
-    display_names = []
-    for cat in categories:
-        dn = cat.get("displayName", "")
-        if dn:
-            display_names.append(dn)
-
-    # Sort by length descending for longest match
-    display_names.sort(key=len, reverse=True)
-
-    event_upper = event_name.upper()
-    for dn in display_names:
-        dn_upper = dn.upper()
-        if event_upper.startswith(dn_upper):
-            remainder = event_name[len(dn):].strip()
-            return dn, remainder if remainder else event_name
-        # Also try: displayName may be a partial match mid-string
-        # e.g. "A-Silmut, Tytöt" vs schedule text "A-Silmut Tytöt"
-        # Try a normalized comparison (remove commas, extra spaces)
-        dn_norm = _normalize_for_match(dn_upper)
-        ev_norm = _normalize_for_match(event_upper)
-        if ev_norm.startswith(dn_norm) and len(dn_norm) > 3:
-            remainder = event_name[len(dn):].strip()
-            # Try to find the actual split point by scanning past the matched category chars
-            # Account for possible punctuation differences
-            split_pos = _find_split_position(event_name, dn)
-            if split_pos > 0:
-                remainder = event_name[split_pos:].strip()
-            return dn, remainder if remainder else event_name
-
+    names = {name for cat in categories or []
+             for name in (cat.get("displayName"), cat.get("displayNameFi")) if name}
+    for name in sorted(names, key=lambda n: (-len(_folded(n)), n)):
+        end = _name_end(event_name, name)
+        if end is None:
+            continue
+        mark = _SPLIT_MARK_RE.match(event_name, end)
+        if mark:
+            end = mark.end()
+        category = event_name[:end].strip(" ,-/")
+        segment = event_name[end:].strip(" ,-/")
+        if category and segment:
+            return category, segment
     return "", event_name
 
 
@@ -197,34 +182,6 @@ def _normalize_for_match(text):
     text = re.sub(r'[,.\-/]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
-
-
-def _find_split_position(event_name, display_name):
-    """
-    Find where in event_name the display_name portion ends,
-    accounting for minor punctuation differences.
-    """
-    en_norm = _normalize_for_match(event_name)
-    dn_norm = _normalize_for_match(display_name)
-
-    if not en_norm.startswith(dn_norm):
-        return 0
-
-    # Map normalized position back to original string
-    # Walk through original string counting "significant" characters
-    norm_idx = 0
-    for i, ch in enumerate(event_name):
-        norm_ch = ch.upper()
-        if norm_ch in ',./-':
-            continue
-        if ch == ' ' and norm_idx > 0:
-            # Check if we consumed all of dn_norm
-            pass
-        if norm_idx >= len(dn_norm):
-            return i
-        norm_idx += 1
-
-    return len(event_name)
 
 
 def get_schedule_start_time(schedule_entries, category_name, segment_name, date_str=None):
