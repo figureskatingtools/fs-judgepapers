@@ -200,6 +200,12 @@ def test_unreadable_file_is_none(tmp_path):
     ("SM-NOVIISI TYTÖT FREE SKATING", None, ("SM-NOVIISI TYTÖT", "FREE SKATING")),
     ("SM-NOVIISI TYTÖT FREE SKATING", "Free Skating", ("SM-NOVIISI TYTÖT", "FREE SKATING")),
     ("SOLO BEGINNER PD1 (DUTCH WALTZ)", None, ("SOLO BEGINNER", "PD1 (DUTCH WALTZ)")),
+    # A free program skated in two groups: the number belongs to the segment
+    ("JUNIORDAMER FREE SKATING 2", None, ("JUNIORDAMER", "FREE SKATING 2")),
+    ("JUNIORDAMER  FREE SKATING 2", None, ("JUNIORDAMER", "FREE SKATING 2")),
+    ("SM-NOVIISI TYTÖT Short Program 1", None, ("SM-NOVIISI TYTÖT", "Short Program 1")),
+    # ... but a number is not a segment by itself
+    ("JUNIORDAMER 2", None, ("JUNIORDAMER 2", None)),
     ("SOMETHING  ELSE", None, ("SOMETHING", "ELSE")),
     ("JUST A TITLE", None, ("JUST A TITLE", None)),
 ])

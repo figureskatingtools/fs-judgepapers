@@ -31,6 +31,7 @@ from categories import (
     names_from_sheet_line,
 )
 from competition_schedule import parse_competition_schedule, get_schedule_start_time
+from schedule_check import check_schedule, start_list_title
 import email_sender
 from trainees import parse_trainees, sanitize_trainees
 from platform_clock import (
@@ -1802,6 +1803,10 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
         # category group (parsed 'category') -> its name as FSM printed it there
         printed_category_names = {}
         schedule_blob_name = None  # Track CompetitionSchedule blob for later parsing
+        # For the schedule check: what FSM printed as each segment's category +
+        # segment (start list title, JudgesSheetAll line 2) and its date.
+        prefix_titles = {}  # prefix -> [printed title, ...]
+        prefix_dates = {}   # prefix -> 'YYYYMMDD' of its StartListwithTimes
 
         for blob in blobs:
             # Filter out files in subfolders (only process root of competition folder)
@@ -1878,6 +1883,8 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
                                 
                                 # Line 2 = category and segment name as FSM prints them
                                 if len(non_empty) >= 2:
+                                    if "JudgesSheetAll" in parsed['suffix'] and parsed.get('prefix'):
+                                        prefix_titles.setdefault(parsed['prefix'], []).append(non_empty[1])
                                     cat_name, seg_name = names_from_sheet_line(
                                         non_empty[1],
                                         match_category(parsed.get('prefix', ''), categories),
@@ -1908,6 +1915,10 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
                                 text = reader.pages[0].extract_text()
 
                             if text:
+                                title = start_list_title(text)
+                                if title and parsed.get('prefix'):
+                                    prefix_titles.setdefault(parsed['prefix'], []).append(title)
+
                                 # Look for Event Date pattern: dd MONTH yyyy (e.g. 25 OCTOBER 2025)
                                 # Usually appears in header like: SATURDAY, 25 OCTOBER 2025
                                 # We ignore the d.m.yyyy format to avoid capturing "Printed at" footer timestamps
@@ -1924,6 +1935,8 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
                                         
                                         # Store as YYYY-MM-DD for sorting
                                         detected_dates.add(dt.strftime("%Y-%m-%d"))
+                                        if parsed.get('prefix'):
+                                            prefix_dates.setdefault(parsed['prefix'], dt.strftime("%Y%m%d"))
                                     except Exception as e:
                                         logging.warning(f"Date parse error: {e}")
                     except Exception as ex:
@@ -1995,17 +2008,31 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
         
         structure = enriched_structure
 
-        # Parse CompetitionSchedule if present (for schedule info in response)
-        schedule_data = []
+        # Schedule check: which segments of the uploaded CompetitionSchedule
+        # have papers among the uploads. None = no check (no schedule, or one
+        # that can't be read); never an error, the page works without it.
+        schedule_check = None
         if schedule_blob_name:
             try:
                 blob_client = container.get_blob_client(schedule_blob_name)
                 stream = io.BytesIO()
                 blob_client.download_blob().readinto(stream)
                 stream.seek(0)
-                schedule_data = parse_competition_schedule(stream, categories)
+                schedule_rows = parse_competition_schedule(stream, categories)
+                if schedule_rows:
+                    # After the enrichment above a file's 'category' is its
+                    # card's key in `structure`.
+                    prefix_cards = {f['prefix']: f['category'] for f in files_data
+                                    if f.get('prefix') and f.get('type') != 'Competition'}
+                    schedule_check = {"rows": check_schedule(
+                        schedule_rows,
+                        [{"prefix": prefix, "categoryKey": prefix_cards.get(prefix),
+                          "titles": titles, "date": prefix_dates.get(prefix)}
+                         for prefix, titles in prefix_titles.items()],
+                        [key for key in structure if key != "Uncategorized"])}
             except Exception as ex:
-                logging.warning(f"Error parsing CompetitionSchedule: {ex}")
+                logging.warning(f"Schedule check failed: {type(ex).__name__}")
+                schedule_check = None
 
         # Process metadata
         comp_type_display = (_type_display(next(iter(detected_types.values())))
@@ -2066,6 +2093,10 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
             "files": files_data,
             "structure": structure,
             "competitionFiles": competition_files,
+            # The CompetitionSchedule's segments, each found / missing /
+            # notNeeded among the uploads (schedule_check.check_schedule);
+            # null without a readable schedule.
+            "scheduleCheck": schedule_check,
             "alerts": alerts,
             "categories": list(detected_category_codes),
             "generatedFiles": generated_links,

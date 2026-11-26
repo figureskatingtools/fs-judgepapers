@@ -38,20 +38,20 @@ Sign-in is Microsoft Entra ID enforced by App Service Easy Auth on [figureskatin
 
 ## Judging Method: ISU vs MUPI
 
-Every category has a judging method, **ISU** or **MUPI**, which decides which FSM exports a segment needs before packets can be generated:
+Every category has a judging method, **ISU** or **MUPI**, which decides which FSM exports a segment is expected to have:
 
-| Method | Required per segment | Required once per category |
+| Method | Expected per segment | Expected once per category |
 |---|---|---|
 | MUPI | `StartListwithTimes`, `ISUPanelofJudgesandTechnicalPanel`, `JudgesSheetAll`, `RefereeSheet` | `CalculationSetupVerificationforReferee` |
 | ISU | the MUPI set plus `PlannedProgramContent`, `TechnicalControllerSheet` and at least one `TechnicalSpecialistSheet` | `CalculationSetupVerificationforReferee` |
 
-The method comes from the `categories` Azure Table (`JudgingMethod` column, one row per category abbreviation). The generated packets themselves do not depend on it: each official gets the sheets that exist for their role, so the method only controls the required-file check, the ISU/MUPI marker on the category card, and the `JudgingMethod` value recorded in the competition's statistics.
+The method comes from the `categories` Azure Table (`JudgingMethod` column, one row per category abbreviation). The generated packets themselves do not depend on it: each official gets the sheets that exist for their role, so the method only controls the [missing-papers check](#missing-papers), the ISU/MUPI marker on the category card, and the `JudgingMethod` value recorded in the competition's statistics.
 
 ### Switching a synchronized skating category
 
 Synchronized skating categories are judged under ISU in some competitions and under MUPI in others, so for them the table value is only a default. On the competition page, every synchronized skating category card shows an **ISU | MUPI** control in its header instead of the plain marker:
 
-1. Click the method the competition uses. The card re-validates at once: switching to MUPI drops the three ISU-only files from the missing list, switching to ISU adds them back, and the Generate button follows.
+1. Click the method the competition uses. The card re-validates at once: switching to MUPI drops the three ISU-only files from the missing list, switching to ISU adds them back.
 2. The choice is saved immediately for **this competition only** and survives reloads. All `#N` split groups of the same category switch together.
 3. Clicking the method that matches the table default clears the override, so a later correction of the table applies again to this competition.
 
@@ -68,6 +68,21 @@ The override is stored in the competition's `metadata.json`:
 Keys are category abbreviations, values `ISU` or `MUPI`; only deviations from the table default are kept. The UI writes it through `POST /api/save_competition_settings` (`{ "id": "<competition id>", "settings": { "judgingMethodOverrides": { ... } } }`, full map on every save, invalid values are rejected with 400). `GET /api/get_competition_details` returns each file's effective `judgingMethod` together with `defaultJudgingMethod` and `judgingMethodOverridable`, plus the stored map as `judgingMethodOverrides`. `generate_judging_papers` reads the map from `metadata.json` itself when it records statistics, so the client cannot desynchronise it.
 
 `save_competition_settings` stores only these two settings keys, `judgingMethodOverrides` and `trainees` (any other key is a 400), each replaced wholesale. It reads the existing `metadata.json` strictly: if storage can't be read it answers 503 `Storage unavailable, try again` and writes nothing. The write is conditional on the file being unchanged since that read; otherwise the save re-reads, re-merges and retries, and after three attempts answers 409 `Settings changed meanwhile, try again`. A save therefore never wipes the file's other contents, and a concurrent save of the other key (or a rename) is not lost. Two saves of the same key still end with the last one, since each sends its full value. `get_competition_details` and `generate_judging_papers` answer the same 503 when `metadata.json` can't be read, never empty settings; a missing file means no settings. `metadata.json` itself (and `init.md`) can't be removed through `delete_file`.
+
+## Missing papers
+
+The competition page marks what is missing, in the file list itself:
+
+Papers are expected only where some are uploaded. A competition is rarely uploaded in one go: a later segment's papers (a Free Skating in reverse order of the Short Program's result) can be made only once the earlier one is skated, and often only the first day exists before the competition. A category may also have a single segment.
+
+- **A missing file.** A segment is checked once one of its files is uploaded: each file it should still have (per the table above) is a `MISSING` row in that segment. The calculation setup is expected once the category has such a segment.
+- **A scheduled segment that is not uploaded yet.** When `CompetitionSchedule.pdf` is uploaded, every segment in it is looked up among the uploads by the category and segment FSM prints (on the schedule, as the title of the segment's `StartListwithTimes` and on line 2 of its `JudgesSheetAll`). A segment with entries and no papers is a quiet grey *Not uploaded yet* note in its category, or in a grey category of its own when nothing of the category is uploaded. It is not an error, and the category keeps its green check. Segments with 0 entries are left out.
+- **A forgotten category.** The one case where the schedule marks something `MISSING`: no segment of a category has any papers (nothing uploaded, or only its calculation setup), and its first scheduled segment is skated on a day for which another category's papers are uploaded. A first segment waits for no result, so on a day that is being prepared it should be there. The category's later segments stay quiet notes, and so does a category that starts on a day nothing is uploaded for.
+- **A category with only its calculation setup** and no schedule to say when it skates is shown as *no segment papers yet*: neither an error nor a green check.
+
+With anything marked `MISSING`, **Generate Papers** asks first: it lists what is missing, and the papers are generated only after ticking *Generate anyway, without the missing papers*. A segment without its panel or its time schedule is left out of the papers; any other missing sheet is simply not in the packets. Segments that are merely not uploaded yet are never asked about. The button is disabled only when no segment at all could be generated.
+
+The check is made by the site from `GET /api/get_competition_details`, whose `scheduleCheck` lists the schedule's segments as `found`, `missing` or `notNeeded` (`null` without a readable schedule). `generate_judging_papers` itself does not refuse anything.
 
 ## Trainees
 

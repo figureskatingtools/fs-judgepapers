@@ -6,15 +6,36 @@ The CompetitionSchedule PDF contains dates, start/finish times, entry counts,
 and full event names (category + segment) for each segment in a competition.
 
 Layout per schedule block:
-    dd.mm.yyyy                          (date line)
-    HH:MM:SS  HH:MM:SS  N  EventName   (segment lines, one per event)
+    dd.mm.yyyy                                      (date line)
+    start  finish  N  Category  Segment  durations  (segment lines, one per event)
     ...
     (next date line or end of page)
+
+Times are printed as the exporting PC's locale has them: 14:00:00 or 16.00.00.
 """
 
 import re
 import logging
 from pypdf import PdfReader
+
+try:
+    from .categories import _SPLIT_MARK_RE, _folded, _name_end
+    from .combined_schedule import split_title
+except ImportError:
+    from categories import _SPLIT_MARK_RE, _folded, _name_end
+    from combined_schedule import split_title
+
+
+# A clock time as FSM prints it, seconds optional: 14:00:00, 16.00.00, 9.30
+_TIME = r'\d{1,2}[.:]\d{2}(?:[.:]\d{2})?'
+# A segment line, from its first character: start, finish, number of entries,
+# then the event text. Matched at the start of the line only, so the duration
+# columns further right are never taken for the start time.
+_ROW_RE = re.compile(rf'({_TIME})\s+({_TIME})\s+(\d+)\s+(\S.*)')
+# The columns after the segment (Resurfacing, Performance, Judging First /
+# Last): durations, always with seconds.
+_TRAILING_DURATIONS_RE = re.compile(r'(?:\s+\d{1,2}[.:]\d{2}[.:]\d{2})+\s*$')
+_DATE_RE = re.compile(r'\b(\d{2})\.(\d{2})\.(\d{4})\b')
 
 
 def parse_competition_schedule(pdf_path_or_stream, categories=None):
@@ -28,47 +49,27 @@ def parse_competition_schedule(pdf_path_or_stream, categories=None):
             "start_time": "HH:MM",
             "end_time": "HH:MM",
             "entries": int,
-            "event_name": str,        # full event text (category + segment)
-            "category_name": str,     # matched category display name or ""
-            "segment_name": str,      # remainder after stripping category, or full event_name
+            "event_name": str,        # category + segment as printed, single spaces
+            "category_name": str,     # as printed, or "" when the text can't be split
+            "segment_name": str,      # as printed, or the whole event_name
         }
 
     Args:
         pdf_path_or_stream: file path (str) or file-like object
         categories: optional list of category dicts from load_categories()
-                    (used to split event_name into category + segment)
+                    (the last resort for splitting event_name)
+
+    Returns [] when the PDF can't be read.
     """
     try:
         reader = PdfReader(pdf_path_or_stream)
     except Exception as e:
-        logging.error(f"Error reading CompetitionSchedule: {e}")
+        logging.error(f"Error reading CompetitionSchedule: {type(e).__name__}")
         return []
 
     entries = []
     current_date = None          # YYYYMMDD
     current_date_display = None  # dd.mm.yyyy
-
-    # Patterns
-    # Date line: dd.mm.yyyy (possibly with surrounding text/whitespace)
-    date_pattern = re.compile(r'\b(\d{2})\.(\d{2})\.(\d{4})\b')
-    # Segment line: start_time  end_time  count  category_name  segment_name
-    # The category and segment are in separate columns in the PDF.
-    # With layout extraction, they are separated by 2+ spaces.
-    # We first try the two-column pattern (category + segment separated by
-    # multiple spaces), then fall back to a single event_name blob.
-    segment_pattern_two_col = re.compile(
-        r'(\d{1,2}:\d{2}(?::\d{2})?)\s+'     # start time
-        r'(\d{1,2}:\d{2}(?::\d{2})?)\s+'     # end time
-        r'(\d+)\s{2,}'                         # number of entries + wide gap
-        r'(.+?)\s{2,}'                         # category name (up to wide gap)
-        r'(\S.+)'                              # segment name (rest of line)
-    )
-    segment_pattern = re.compile(
-        r'(\d{1,2}:\d{2}(?::\d{2})?)\s+'   # start time
-        r'(\d{1,2}:\d{2}(?::\d{2})?)\s+'   # end time
-        r'(\d+)\s+'                          # number of entries
-        r'(.+)'                              # event name (rest of line)
-    )
 
     for page in reader.pages:
         try:
@@ -79,70 +80,69 @@ def parse_competition_schedule(pdf_path_or_stream, categories=None):
         if not text:
             continue
 
-        lines = text.split('\n')
-        for line in lines:
+        for line in text.split('\n'):
             stripped = line.strip()
             if not stripped:
                 continue
 
-            # Try to match a date line
-            date_match = date_pattern.search(stripped)
-            # A date line is one that is predominantly a date (short line)
-            # or starts with a day-of-week name, or is just the date.
-            # We detect by checking if the line contains a date AND does NOT
-            # also match a segment pattern (to avoid false positives).
-            seg_match = segment_pattern.search(stripped) or segment_pattern_two_col.search(stripped)
-
-            if date_match and not seg_match:
-                day, month, year = date_match.groups()
-                current_date = f"{year}{month}{day}"
-                current_date_display = f"{day}.{month}.{year}"
+            row = _ROW_RE.match(stripped)
+            if not row:
+                # A date line starts a day. The 'printed: dd.mm.yyyy hh.mm'
+                # stamp is a date too, but not a competition day.
+                date_match = _DATE_RE.search(stripped)
+                if date_match and not stripped.casefold().startswith("printed"):
+                    day, month, year = date_match.groups()
+                    current_date = f"{year}{month}{day}"
+                    current_date_display = f"{day}.{month}.{year}"
                 continue
 
-            if seg_match and current_date:
-                # Try two-column pattern first (Category and Segment in separate columns)
-                two_col = segment_pattern_two_col.search(stripped)
-                if two_col:
-                    start_raw, end_raw, count_str, cat_name_raw, seg_name_raw = two_col.groups()
-                    start_time = _normalize_time(start_raw)
-                    end_time = _normalize_time(end_raw)
-                    cat_name_raw = cat_name_raw.strip()
-                    seg_name_raw = seg_name_raw.strip()
-                    event_name = f"{cat_name_raw} {seg_name_raw}"
-                    entries.append({
-                        "date": current_date,
-                        "date_display": current_date_display,
-                        "start_time": start_time,
-                        "end_time": end_time,
-                        "entries": int(count_str),
-                        "event_name": event_name,
-                        "category_name": cat_name_raw,
-                        "segment_name": seg_name_raw,
-                    })
-                else:
-                    start_raw, end_raw, count_str, event_name = seg_match.groups()
-                    start_time = _normalize_time(start_raw)
-                    end_time = _normalize_time(end_raw)
-                    event_name = event_name.strip()
-                    cat_name, seg_name = _split_event_name(event_name, categories)
-                    entries.append({
-                        "date": current_date,
-                        "date_display": current_date_display,
-                        "start_time": start_time,
-                        "end_time": end_time,
-                        "entries": int(count_str),
-                        "event_name": event_name,
-                        "category_name": cat_name,
-                        "segment_name": seg_name,
-                    })
+            if not current_date:
+                continue
+
+            start_raw, end_raw, count_str, event = row.groups()
+            event = _TRAILING_DURATIONS_RE.sub('', event).strip()
+            if not event:
+                continue
+            category_name, segment_name = _split_event(event, categories)
+            entries.append({
+                "date": current_date,
+                "date_display": current_date_display,
+                "start_time": _normalize_time(start_raw),
+                "end_time": _normalize_time(end_raw),
+                "entries": int(count_str),
+                "event_name": _single_spaced(event),
+                "category_name": category_name,
+                "segment_name": segment_name,
+            })
 
     logging.info(f"Parsed {len(entries)} schedule entries from CompetitionSchedule")
     return entries
 
 
+def _single_spaced(text):
+    return ' '.join(text.split())
+
+
+def _split_event(event, categories):
+    """
+    (category, segment) of a schedule row's event text, both as printed. Layout
+    extraction keeps the two columns 2+ spaces apart; a row that came out as
+    one string is split before a known segment name (split_title), and only
+    then against the categories table. ("", whole text) when nothing fits.
+    """
+    parts = re.split(r'\s{2,}', event, maxsplit=1)
+    if len(parts) == 2:
+        return _single_spaced(parts[0]), _single_spaced(parts[1])
+    event = _single_spaced(event)
+    category, segment = split_title(event)
+    if segment:
+        return category, segment
+    return _split_event_name(event, categories)
+
+
 def _normalize_time(time_str):
-    """Convert HH:MM:SS or H:MM to HH:MM."""
-    parts = time_str.split(':')
+    """Convert HH:MM:SS, H.MM.SS or H:MM to HH:MM."""
+    parts = re.split(r'[.:]', time_str)
     hh = parts[0].zfill(2)
     mm = parts[1] if len(parts) > 1 else '00'
     return f"{hh}:{mm}"
@@ -150,46 +150,29 @@ def _normalize_time(time_str):
 
 def _split_event_name(event_name, categories):
     """
-    Split a full event name like "Advanced Novice Ice Dance PDK1 (Starlight Waltz)"
-    into category_name="Advanced Novice Ice Dance" and segment_name="PDK1 (Starlight Waltz)".
-
-    Uses the categories table displayName values for longest-match.
-    Falls back to returning ("", event_name) if no match found.
+    Last resort for a row that came out as one string and does not end in a
+    known segment name: split it after the longest categories-table name it
+    starts with. Both of a row's names count (`displayName`, `displayNameFi`),
+    since the schedule prints the competition's own language, and they are
+    compared like line 2 of the judges' sheets (categories._name_end: case,
+    spacing and punctuation ignored, on a word boundary). The table only
+    locates the split: both parts are returned as the schedule prints them, a
+    split group's `#N` included. ("", event_name) when no name fits or
+    nothing follows it.
     """
-    if not categories:
-        return "", event_name
-
-    # Build a list of (displayName, length) sorted by length descending
-    # for longest-match-first strategy
-    display_names = []
-    for cat in categories:
-        dn = cat.get("displayName", "")
-        if dn:
-            display_names.append(dn)
-
-    # Sort by length descending for longest match
-    display_names.sort(key=len, reverse=True)
-
-    event_upper = event_name.upper()
-    for dn in display_names:
-        dn_upper = dn.upper()
-        if event_upper.startswith(dn_upper):
-            remainder = event_name[len(dn):].strip()
-            return dn, remainder if remainder else event_name
-        # Also try: displayName may be a partial match mid-string
-        # e.g. "A-Silmut, Tytöt" vs schedule text "A-Silmut Tytöt"
-        # Try a normalized comparison (remove commas, extra spaces)
-        dn_norm = _normalize_for_match(dn_upper)
-        ev_norm = _normalize_for_match(event_upper)
-        if ev_norm.startswith(dn_norm) and len(dn_norm) > 3:
-            remainder = event_name[len(dn):].strip()
-            # Try to find the actual split point by scanning past the matched category chars
-            # Account for possible punctuation differences
-            split_pos = _find_split_position(event_name, dn)
-            if split_pos > 0:
-                remainder = event_name[split_pos:].strip()
-            return dn, remainder if remainder else event_name
-
+    names = {name for cat in categories or []
+             for name in (cat.get("displayName"), cat.get("displayNameFi")) if name}
+    for name in sorted(names, key=lambda n: (-len(_folded(n)), n)):
+        end = _name_end(event_name, name)
+        if end is None:
+            continue
+        mark = _SPLIT_MARK_RE.match(event_name, end)
+        if mark:
+            end = mark.end()
+        category = event_name[:end].strip(" ,-/")
+        segment = event_name[end:].strip(" ,-/")
+        if category and segment:
+            return category, segment
     return "", event_name
 
 
@@ -199,34 +182,6 @@ def _normalize_for_match(text):
     text = re.sub(r'[,.\-/]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
-
-
-def _find_split_position(event_name, display_name):
-    """
-    Find where in event_name the display_name portion ends,
-    accounting for minor punctuation differences.
-    """
-    en_norm = _normalize_for_match(event_name)
-    dn_norm = _normalize_for_match(display_name)
-
-    if not en_norm.startswith(dn_norm):
-        return 0
-
-    # Map normalized position back to original string
-    # Walk through original string counting "significant" characters
-    norm_idx = 0
-    for i, ch in enumerate(event_name):
-        norm_ch = ch.upper()
-        if norm_ch in ',./-':
-            continue
-        if ch == ' ' and norm_idx > 0:
-            # Check if we consumed all of dn_norm
-            pass
-        if norm_idx >= len(dn_norm):
-            return i
-        norm_idx += 1
-
-    return len(event_name)
 
 
 def get_schedule_start_time(schedule_entries, category_name, segment_name, date_str=None):
