@@ -117,11 +117,51 @@ def _is_file_name(value):
     return isinstance(value, str) and _FILE_RE.fullmatch(value) is not None
 
 
+def _is_text_or_none(value):
+    return value is None or isinstance(value, str)
+
+
+_SEGMENT_KEYS = ("date", "start", "end", "category", "segment")
+
+
+def _is_segment(value):
+    return isinstance(value, dict) and all(_is_text_or_none(value.get(key)) for key in _SEGMENT_KEYS)
+
+
+def _is_part(part, segments):
+    return (isinstance(part, dict)
+            and isinstance(part.get("prefix"), str) and part["prefix"] in segments
+            and isinstance(part.get("role"), str) and isinstance(part.get("label"), str)
+            and _is_count(part.get("pages")) and _is_count(part.get("intro"))
+            and isinstance(part.get("flags"), list) and all(isinstance(flag, str) for flag in part["flags"]))
+
+
+def _is_person(person, segments):
+    return (isinstance(person, dict) and isinstance(person.get("slug"), str)
+            and isinstance(person.get("name"), str) and _is_file_name(person.get("file"))
+            and _is_count(person.get("pages")) and _is_count(person.get("cover"))
+            and isinstance(person.get("parts"), list)
+            and all(_is_part(part, segments) for part in person["parts"])
+            # the cover and the parts are the whole packet
+            and person["cover"] + sum(part["pages"] for part in person["parts"]) == person["pages"])
+
+
+def _is_stored_file(value, *counts):
+    """A zip / schedule entry: a safe file name, its sha256 and the given counts."""
+    return (isinstance(value, dict) and _is_file_name(value.get("file")) and isinstance(value.get("sha256"), str)
+            and all(_is_count(value.get(key)) for key in counts))
+
+
 def parse_index(raw):
     """
     The index from its blob's bytes, or None when it is not an index of this
     version in the expected shape (then Custom generate simply generates
-    again). Checks everything the cut relies on.
+    again). Checks everything a reader of the index relies on (the freshness
+    check, the site's tree, the selection, the cut and the contents page), so
+    none of them meets a value of another type: every segment is an object of
+    texts, every day, person and part has its fields in their types, days and
+    a day's people are named once, a packet's cover and parts add up to its
+    pages and a day's packets and schedule copies to the day document's.
     """
     try:
         index = json.loads(raw)
@@ -132,33 +172,31 @@ def parse_index(raw):
     segments, days = index.get("segments"), index.get("days")
     if not isinstance(segments, dict) or not isinstance(days, list):
         return None
+    if not all(_is_segment(segment) for segment in segments.values()):
+        return None
+    dates = set()
     for day in days:
         if not isinstance(day, dict) or not isinstance(day.get("date"), str) or not _DATE_RE.fullmatch(day["date"]):
             return None
-        archive, schedule, people = day.get("zip"), day.get("schedule"), day.get("people")
-        if not (isinstance(archive, dict) and _is_file_name(archive.get("file"))
-                and isinstance(archive.get("sha256"), str) and _is_count(archive.get("size"))):
+        if day["date"] in dates or not _is_text_or_none(day.get("title")):
             return None
-        if schedule is not None and not (
-                isinstance(schedule, dict) and _is_file_name(schedule.get("file"))
-                and isinstance(schedule.get("sha256"), str)
-                and _is_count(schedule.get("pages")) and _is_count(schedule.get("copies"))):
+        dates.add(day["date"])
+        schedule, people = day.get("schedule"), day.get("people")
+        if not _is_stored_file(day.get("zip"), "size"):
+            return None
+        if schedule is not None and not _is_stored_file(schedule, "pages", "copies"):
             return None
         if not isinstance(people, list) or not _is_count(day.get("pages")):
             return None
-        for person in people:
-            if not (isinstance(person, dict) and isinstance(person.get("slug"), str)
-                    and isinstance(person.get("name"), str) and _is_file_name(person.get("file"))
-                    and _is_count(person.get("pages")) and _is_count(person.get("cover"))
-                    and isinstance(person.get("parts"), list)):
-                return None
-            for part in person["parts"]:
-                if not (isinstance(part, dict) and isinstance(part.get("prefix"), str)
-                        and isinstance(part.get("role"), str) and _is_count(part.get("pages"))
-                        and part["prefix"] in segments):
-                    return None
-            if person["cover"] + sum(part["pages"] for part in person["parts"]) != person["pages"]:
-                return None
+        if not all(_is_person(person, segments) for person in people):
+            return None
+        if len({person["slug"] for person in people}) != len(people):
+            return None
+        papers = sum(person["pages"] for person in people)
+        if schedule is not None:
+            papers += schedule["pages"] * schedule["copies"]
+        if papers != day["pages"]:
+            return None
     return index
 
 
@@ -485,8 +523,12 @@ def cut_day(zip_path, schedule_path, plan, output_path, contents_path=None):
     """
     if file_sha256(zip_path) != plan["zip"]["sha256"]:
         raise PapersChanged("the day ZIP is not the one the index describes")
-    if plan["schedule"] and file_sha256(schedule_path) != plan["schedule"]["sha256"]:
-        raise PapersChanged("the combined schedule is not the one the index describes")
+    schedule = None
+    if plan["schedule"]:
+        with open(schedule_path, "rb") as f:
+            schedule = f.read()
+        if hashlib.sha256(schedule).hexdigest() != plan["schedule"]["sha256"]:
+            raise PapersChanged("the combined schedule is not the one the index describes")
 
     def assemble(compress):
         writer = PdfWriter()
@@ -504,8 +546,10 @@ def cut_day(zip_path, schedule_path, plan, output_path, contents_path=None):
                 for first, stop in person["ranges"]:
                     for number in range(first, stop):
                         writer.add_page(reader.pages[number])
-        if plan["schedule"]:
-            reader = PdfReader(schedule_path)
+        if schedule is not None:
+            # the bytes whose sha256 was just checked against the index, never
+            # the file a second time: a schedule of another run can't get in
+            reader = PdfReader(io.BytesIO(schedule))
             if len(reader.pages) != plan["schedule"]["pages"]:
                 raise PapersChanged("the combined schedule has another page count")
             for _ in range(plan["schedule"]["copies"]):

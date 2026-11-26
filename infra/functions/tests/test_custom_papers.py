@@ -186,6 +186,22 @@ def test_an_index_reads_back_and_its_pages_add_up(papers):
     lambda index: index["days"][0]["zip"].update(file="../other-record/judgePapers/x.zip"),
     lambda index: index["days"][0]["schedule"].update(file="../metadata.json"),
     lambda index: index["days"][0]["people"][0].update(file="a/b.pdf"),
+    # values of another type than a reader of the index expects
+    lambda index: index["segments"].update({SP: None}),
+    lambda index: index["segments"].update({SP: "JUNIORIT NAISET"}),
+    lambda index: index["segments"][SP].update(category=["JUNIORIT NAISET"]),
+    lambda index: index["segments"][SP].update(start=1000),
+    lambda index: index["days"][0].update(title={"name": "Syyskisa"}),
+    lambda index: index["days"][0]["people"][0]["parts"][0].update(label=3),
+    lambda index: index["days"][0]["people"][0]["parts"][0].pop("label"),
+    lambda index: index["days"][0]["people"][0]["parts"][0].update(intro=-1),
+    lambda index: index["days"][0]["people"][0]["parts"][0].update(flags="calculationSetup"),
+    lambda index: index["days"][0]["people"][0]["parts"][0].update(flags=[None]),
+    lambda index: index["days"][0]["people"].append(None),
+    # a day or a person named twice, or a day whose pages don't add up
+    lambda index: index["days"].append(index["days"][0]),
+    lambda index: index["days"][0]["people"].append(index["days"][0]["people"][0]),
+    lambda index: index["days"][0].update(pages=index["days"][0]["pages"] + 1),
 ])
 def test_a_damaged_index_is_no_index(papers, damage):
     index = json.loads(json.dumps(papers[0]))

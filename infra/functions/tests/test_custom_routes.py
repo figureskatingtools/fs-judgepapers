@@ -291,6 +291,32 @@ def test_unreadable_settings_are_no_answer(competition, monkeypatch):
     assert (response.status_code, text(response)) == (503, "Storage unavailable, try again")
 
 
+@pytest.mark.parametrize("damage", [
+    lambda index: index["segments"].update({SP: None}),
+    lambda index: index["days"][0]["people"][0]["parts"][0].update(label=None),
+    lambda index: index["days"][0].update(pages=1),
+])
+def test_a_stored_index_in_another_shape_is_no_index(competition, blobs, tables, damage):
+    # fresh by every fingerprint, but not an index a reader can trust: the
+    # answer is "generate again", never an error
+    generate()
+    selection = everything(current_index())
+    index = json.loads(blobs.blobs[INDEX_BLOB].data)
+    generation = index["generation"]
+    damage(index)
+    blobs.upload_blob(INDEX_BLOB, json.dumps(index), overwrite=True)
+
+    response = index_state()
+
+    assert response.status_code == 200, text(response)
+    body = payload(response)
+    assert (body["current"], body["reason"], body["index"]) == (False, "none", None)
+    refused(blobs, tables, custom(selection, generation=generation), 409, fa.PAPERS_CHANGED)
+    # and a generate run puts a good one in its place
+    generate()
+    assert current_index()["generation"] != generation
+
+
 @pytest.mark.parametrize("request_kw", [
     {"raw_body": b"not json"},
     {"body": []},
