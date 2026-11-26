@@ -19,7 +19,8 @@ routes depend on:
     `ResourceExistsError` with overwrite=False (the SDK converts it); without
     conditions, overwrite=False on an existing blob raises `ResourceExistsError`.
     `before_upload(name)` on the container, when set, runs first on every
-    upload: a test's stand-in for a concurrent writer.
+    upload: a test's stand-in for a concurrent writer. `delete_blob` honours
+    `etag` + `MatchConditions.IfNotModified` (`ResourceModifiedError`).
 """
 import itertools
 import re
@@ -195,7 +196,10 @@ class FakeBlobClient:
         return FakeDownloader(blob.data, blob.properties())
 
     def upload_blob(self, data, overwrite=False, metadata=None, **kwargs):
+        """Like BlobClient.upload_blob: the new blob's etag and last_modified."""
         self._container.upload_blob(self.blob_name, data, overwrite=overwrite, metadata=metadata, **kwargs)
+        blob = self._container.blobs[self.blob_name]
+        return {"etag": blob.etag, "last_modified": blob.last_modified}
 
     def get_blob_properties(self):
         blob = self._container.blobs.get(self.blob_name)
@@ -238,6 +242,7 @@ class FakeContainerClient:
         if isinstance(data, str):
             data = data.encode("utf-8")
         self.blobs[name] = FakeBlob(name, data, metadata, self._tick())
+        return FakeBlobClient(self, name)   # like ContainerClient.upload_blob
 
     def list_blobs(self, name_starts_with=None, include=None):
         with_metadata = bool(include) and "metadata" in include
@@ -245,9 +250,11 @@ class FakeContainerClient:
                 for name, blob in sorted(self.blobs.items())
                 if not name_starts_with or name.startswith(name_starts_with)]
 
-    def delete_blob(self, name):
+    def delete_blob(self, name, etag=None, match_condition=None, **kwargs):
         if name not in self.blobs:
             raise ResourceNotFoundError("blob not found")
+        if match_condition == MatchConditions.IfNotModified and self.blobs[name].etag != etag:
+            raise ResourceModifiedError("The condition specified using HTTP conditional header(s) is not met.")
         del self.blobs[name]
 
     def download_blob(self, name):

@@ -24,6 +24,7 @@ from conftest import (
     text,
 )
 from fakes import FakeContainerClient
+from test_custom_papers import DATE as PAPERS_DATE, FS, seed_papers
 
 REAL_IDENTITIES_CLIENT = platform_access.get_identities_table_client
 REAL_ACCESS_CLIENT = platform_access.get_access_table_client
@@ -36,6 +37,7 @@ OTHER_ID = "9e9e9e9e-1111-4222-8333-444444444444"
 THIRD_ID = "7d7d7d7d-5555-4666-8777-888888888888"
 STRANGER_OID = "99999999-8888-4777-8666-555555555555"
 LINK_ID = "ab" * 32
+GENERATION = "cd" * 16   # of the seeded papers index (Custom generate)
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +53,7 @@ def pool(monkeypatch):
 
 
 @pytest.fixture
-def competition(tables, blobs, pool, monkeypatch):
+def competition(tables, blobs, pool, monkeypatch, tmp_path):
     monkeypatch.setattr(fa, "_get_categories", lambda: [])
     monkeypatch.setattr(fa, "process_judging_papers", lambda *a, **kw: {})
     row = put_competition(tables, comp_id=COMP_ID, platform_id=PLATFORM_ID,
@@ -62,6 +64,8 @@ def competition(tables, blobs, pool, monkeypatch):
     blobs.upload_blob(f"{folder}/{SOURCE_FILE}", b"%PDF-source")
     blobs.upload_blob(f"{folder}/judgePapers/{SENT_FILE}", b"%PDF-out")
     tables["generatedpapers"].put(PartitionKey=COMP_ID, RowKey=SENT_FILE, FileName=SENT_FILE)
+    # Generated papers with their index (generate_custom_papers).
+    seed_papers(blobs, folder, tmp_path, generation=GENERATION)
     # A copied link the default caller made (revoke_download_link).
     tables["sentemails"].put(PartitionKey=COMP_ID, RowKey=LINK_ID, KeyKind="sha256",
                              Channel="link", SentByTid=USER_TID, SentByOid=USER_OID,
@@ -97,6 +101,12 @@ ROUTES = {
     "generate_judging_papers": ("write", lambda **kw: call(
         fa.generate_judging_papers, make_request(
             "POST", body={"workingFolder": COMP_ID, "options": {}}, **kw))),
+    "get_papers_index": ("write", lambda **kw: call(
+        fa.get_papers_index, make_request("POST", body={"id": COMP_ID, "options": {}}, **kw))),
+    "generate_custom_papers": ("write", lambda **kw: call(
+        fa.generate_custom_papers, make_request("POST", body={
+            "id": COMP_ID, "generation": GENERATION,
+            "selection": {PAPERS_DATE: {"people": {"anna_judge": {"parts": [[FS, "judge"]]}}}}}, **kw))),
     "preview_judge_papers_email": ("write", lambda **kw: call(
         fa.preview_judge_papers_email, make_request("POST", body=_send_body(), **kw))),
     "send_judge_papers": ("write", lambda **kw: call(
@@ -223,13 +233,14 @@ def test_a_revoked_grant_stops_working_when_the_cache_expires(competition, acces
 
 
 @pytest.mark.parametrize("route", sorted(set(ROUTES) - {"resolve_competition"}))
-def test_an_unbound_record_is_admin_only(route, tables, blobs, pool, monkeypatch, access):
+def test_an_unbound_record_is_admin_only(route, tables, blobs, pool, monkeypatch, access, tmp_path):
     monkeypatch.setattr(fa, "_get_categories", lambda: [])
     monkeypatch.setattr(fa, "process_judging_papers", lambda *a, **kw: {})
     row = put_competition(tables, comp_id=COMP_ID, deletion="2099-01-01T00:00:00Z")
     blobs.upload_blob(f"{row['FolderPath']}/{SOURCE_FILE}", b"%PDF-source")
     blobs.upload_blob(f"{row['FolderPath']}/judgePapers/{SENT_FILE}", b"%PDF-out")
     tables["generatedpapers"].put(PartitionKey=COMP_ID, RowKey=SENT_FILE, FileName=SENT_FILE)
+    seed_papers(blobs, row['FolderPath'], tmp_path, generation=GENERATION)
     tables["sentemails"].put(PartitionKey=COMP_ID, RowKey=LINK_ID, KeyKind="sha256",
                              Channel="link", SentByTid=USER_TID, SentByOid=USER_OID,
                              FileName=SENT_FILE, LinkExpiry="2099-01-01T00:00:00Z")

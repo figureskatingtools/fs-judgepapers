@@ -174,7 +174,7 @@ def test_a_signing_failure_leaves_the_links_empty(seeded, monkeypatch):
 
 
 def test_generation_stores_the_blob_name_not_a_link(seeded, signing, monkeypatch):
-    def process(source_dir, output_dir, options=None):
+    def process(source_dir, output_dir, options=None, index_dir=None):
         for name in (OLD_FILE, "judgingpapers_2026-11-09.pdf"):
             with open(os.path.join(output_dir, name), "wb") as fh:
                 fh.write(b"%PDF-new")

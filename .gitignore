@@ -39,3 +39,6 @@ Thumbs.db
 
 # Tests
 .pytest_cache/
+
+# Playwright MCP scratch output (screenshots, console logs)
+.playwright-mcp/

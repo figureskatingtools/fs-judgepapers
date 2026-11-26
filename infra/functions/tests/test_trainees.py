@@ -438,7 +438,7 @@ def test_details_without_trainees_return_an_empty_list(competition):
 def _generate(monkeypatch, stats, options=None):
     seen = {}
 
-    def process(source_dir, output_dir, options=None):
+    def process(source_dir, output_dir, options=None, index_dir=None):
         seen["options"] = options
         with open(os.path.join(output_dir, "judgingpapers_2026-11-07.pdf"), "wb") as fh:
             fh.write(b"%PDF-out")
