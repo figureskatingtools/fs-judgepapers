@@ -403,6 +403,25 @@ def test_a_long_contents_list_numbers_after_all_its_own_pages(tmp_path):
     assert all("Pages Person Role Segments" in text for text in texts)   # the header row repeats
 
 
+def test_a_person_with_more_segments_than_a_page_holds(tmp_path):
+    prefixes = [f"SEG{n:03d}" for n in range(150)]
+    index = {"segments": {prefix: {"category": "JUNIORIT NAISET", "segment": f"SEGMENT {n:03d}"}
+                          for n, prefix in enumerate(prefixes)}}
+    plan = {"date": DATE, "title": "Syyskisa 2026", "pages": 303, "segments": 150, "schedule": None, "people": [
+        {"name": "Anna JUDGE", "pages": 300, "labels": ["Judge 1"], "segments": prefixes},
+        {"name": "Bert REFEREE", "pages": 3, "labels": ["Referee"], "segments": prefixes[:1]}]}
+    path = tmp_path / "contents.pdf"
+
+    own_pages = custom_papers.create_contents_pdf(str(path), index, plan)
+
+    texts = page_texts(path)
+    assert own_pages == len(texts) >= 3      # the one row runs over the pages instead of failing
+    assert f"{own_pages + 1} – {own_pages + 300} Anna JUDGE Judge 1 JUNIORIT NAISET, SEGMENT 000" in texts[0]
+    everything_printed = " ".join(texts)
+    assert all(f"SEGMENT {n:03d}" in everything_printed for n in range(150))
+    assert f"{own_pages + 301} – {own_pages + 303} Bert REFEREE Referee" in texts[-1]
+
+
 def test_names_with_markup_characters_are_printed_as_they_are(tmp_path):
     people = [("a_b", "Åsa <B> & ÄRÖLÄ", 1, [(SP, "judge", "Judge 1", 1)])]
     index = make_papers(tmp_path / "out", tmp_path / "internal", days=[(DATE, people)], schedule=False)

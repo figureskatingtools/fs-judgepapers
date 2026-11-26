@@ -26,6 +26,7 @@ INTERNAL = f"{FOLDER}/judgePapers/{custom_papers.INTERNAL_FOLDER}"
 INDEX_BLOB = f"{INTERNAL}/{custom_papers.INDEX_FILE}"
 SELECTION_BLOB = f"{INTERNAL}/{custom_papers.SELECTION_FILE}"
 SCHEDULE_BLOB = f"{INTERNAL}/combinedschedule_{DATE}.pdf"
+COUNTER_BLOB = f"{INTERNAL}/{custom_papers.COUNTER_FILE}"
 ZIP_BLOB = f"{FOLDER}/judgePapers/judgingPapers_{DATE}.zip"
 DAY_BLOB = f"{FOLDER}/judgePapers/judgingpapers_{DATE}.pdf"
 SOURCES = ("JUNW-QUAL_StartListwithTimes.pdf", "JUNW-QUAL_JudgesSheetAll.pdf", "JUNW-FNL_StartListwithTimes.pdf")
@@ -359,7 +360,7 @@ def test_everything_ticked_is_the_day_document_plus_contents(competition, blobs)
     assert made["description"] == "Custom papers 1: 3 packets, 2 segments, 24 pages (PDF)"
 
 
-def test_every_run_gets_the_next_number_and_nothing_is_overwritten(competition, blobs, tables):
+def test_every_run_gets_the_next_number_and_no_number_is_given_twice(competition, blobs, tables):
     generate()
     index = current_index()
     names = [payload(custom(segment_only(index, prefix)))["files"][0]["fileName"] for prefix in (FS, SP, FS)]
@@ -367,12 +368,78 @@ def test_every_run_gets_the_next_number_and_nothing_is_overwritten(competition, 
     assert names == [f"judgingpapers_{DATE}_custom{n}.pdf" for n in (1, 2, 3)]
     assert blob_texts(blobs, f"{FOLDER}/judgePapers/{names[0]}") == blob_texts(blobs, f"{FOLDER}/judgePapers/{names[2]}")
 
-    # a deleted one frees no number below the highest in use
-    for name in names[:2]:
+    # Deleting them, the highest included, frees no number: a download link
+    # made for a deleted PDF must never start serving another selection
+    for name in names:
         assert call(fa.delete_file, make_request("POST", params={
             "competition": COMP_ID, "filename": f"judgePapers/{name}"})).status_code == 200
         assert tables["generatedpapers"].row(COMP_ID, name) is None
     assert payload(custom(segment_only(index, SP)))["files"][0]["fileName"] == f"judgingpapers_{DATE}_custom4.pdf"
+    assert json.loads(blobs.blobs[COUNTER_BLOB].data) == {"last": 4}
+
+
+def test_a_lost_counter_starts_above_the_files_that_exist(competition, blobs):
+    generate()
+    index = current_index()
+    for prefix in (FS, SP):
+        custom(segment_only(index, prefix))
+    blobs.delete_blob(COUNTER_BLOB)
+
+    made, = payload(custom(segment_only(index, FS)))["files"]
+
+    assert made["fileName"] == f"judgingpapers_{DATE}_custom3.pdf"
+
+
+def test_two_runs_at_once_get_different_numbers(competition, blobs):
+    generate()
+    index = current_index()
+
+    def other_run(name):     # takes number 7 just before this run writes the counter
+        if name == COUNTER_BLOB:
+            blobs.before_upload = None
+            blobs.upload_blob(COUNTER_BLOB, json.dumps({"last": 7}), overwrite=True)
+
+    blobs.before_upload = other_run
+
+    made, = payload(custom(segment_only(index, FS)))["files"]
+
+    assert made["fileName"] == f"judgingpapers_{DATE}_custom8.pdf"
+    assert json.loads(blobs.blobs[COUNTER_BLOB].data) == {"last": 8}
+
+
+def test_a_counter_that_cannot_be_read_stops_the_run_with_nothing_written(competition, blobs, tables, monkeypatch):
+    generate()
+    index = current_index()
+    monkeypatch.setattr(fa, "_next_custom_number", lambda *a: (_ for _ in ()).throw(RuntimeError("storage")))
+
+    response = custom(segment_only(index, FS))
+
+    refused(blobs, tables, response, 500, "Error processing request. Check server logs for details.")
+
+
+def test_a_run_of_several_days_is_all_or_nothing(competition, blobs, tables):
+    competition["days"] = [(DATE, PEOPLE), (DAY2, PEOPLE2)]
+    generate()
+    index = current_index()
+
+    def someone_else(name):   # every name of the second day is taken just before it is written
+        if f"judgingpapers_{DAY2}_custom" in name and name not in blobs.blobs:
+            blobs.before_upload = None
+            blobs.upload_blob(name, b"%PDF-theirs")
+            blobs.before_upload = someone_else
+
+    blobs.before_upload = someone_else
+
+    response = custom(everything(index))
+
+    assert (response.status_code, text(response)) == (409, "Could not name the custom PDFs, try again")
+    # the first day's PDF of every failed attempt was taken back; only the others' files are there
+    customs = {name: blob.data for name, blob in blobs.blobs.items() if "_custom" in name}
+    assert len(customs) == fa.CUSTOM_NAME_ATTEMPTS and set(customs.values()) == {b"%PDF-theirs"}
+    assert all(f"judgingpapers_{DAY2}_custom" in name for name in customs)
+    assert not any("_custom" in key[1] for key in tables["generatedpapers"].rows)
+    assert SELECTION_BLOB not in blobs.blobs
+    assert "CustomGenerateRunCount" not in tables["competitions"].row("GLOBAL", COMP_ID)
 
 
 def test_a_name_taken_meanwhile_is_skipped(competition, blobs):

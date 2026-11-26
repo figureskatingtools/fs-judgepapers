@@ -46,6 +46,7 @@ INDEX_VERSION = 1
 INTERNAL_FOLDER = "_internal"
 INDEX_FILE = "papers-index.json"
 SELECTION_FILE = "custom-selection.json"
+COUNTER_FILE = "custom-counter.json"   # {"last": N}: the highest custom run number ever given
 # A selection names every ticked part: a three-day competition is ~50 KB
 MAX_REQUEST_BYTES = 512 * 1024
 
@@ -401,7 +402,9 @@ def _contents_story(index, plan, first_page, made):
         span = str(first) if first == last else f"{first} – {last}"
         data.append([Paragraph(span, pages), Paragraph(escape(name), cell), Paragraph(escape(roles), cell),
                      Paragraph("<br/>".join(escape(text) for text in segments), cell)])
-    table = Table(data, colWidths=[24 * mm, 48 * mm, 42 * mm, 66 * mm], repeatRows=1)
+    # splitInRow: a person with more segments than fit on a page continues on
+    # the next one (a table otherwise splits between rows only, and fails)
+    table = Table(data, colWidths=[24 * mm, 48 * mm, 42 * mm, 66 * mm], repeatRows=1, splitInRow=1)
     table.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LINEBELOW", (0, 0), (-1, 0), 0.9, colors.black),

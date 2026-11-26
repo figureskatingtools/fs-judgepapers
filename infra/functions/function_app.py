@@ -2545,7 +2545,53 @@ def generate_judging_papers(req: func.HttpRequest) -> func.HttpResponse:
 
 PAPERS_CHANGED = "papers_changed: the papers were generated again or changed; open Custom generate again"
 _CUSTOM_FILE_RE = re.compile(r"judgingpapers_(\d{8})_custom(\d+)\.pdf")
-CUSTOM_NAME_ATTEMPTS = 20
+CUSTOM_NAME_ATTEMPTS = 5      # runs at another number when a name is taken after all
+CUSTOM_NUMBER_ATTEMPTS = 10   # conditional writes of the counter before giving up
+
+
+def _next_custom_number(container, folder_path, floor=0):
+    """
+    Take the number of a new custom run of this record: one more than the
+    highest ever given. It is kept in judgePapers/_internal/custom-counter.json
+    and written only if nobody wrote it meanwhile (on its ETag, or create-only),
+    so two runs never get the same number, and a number is never given twice,
+    not even after its PDFs were deleted: a download link made for a deleted
+    custom PDF must never start serving another selection under the same name.
+    `floor` (the highest number among the files that exist) covers a counter
+    that was lost. Raises on a storage error or when the counter keeps changing.
+    """
+    blob = container.get_blob_client(_internal_blob_name(folder_path, custom_papers.COUNTER_FILE))
+    for _attempt in range(CUSTOM_NUMBER_ATTEMPTS):
+        try:
+            downloader = blob.download_blob()
+        except ResourceNotFoundError:
+            etag, last = None, 0
+        else:
+            etag = getattr(getattr(downloader, "properties", None), "etag", None)
+            try:
+                last = int(json.loads(downloader.readall()).get("last", 0))
+            except (ValueError, TypeError, AttributeError):
+                last = 0
+        number = max(last, floor) + 1
+        data = json.dumps({"last": number})
+        try:
+            if etag is None:
+                blob.upload_blob(data, overwrite=False)
+            else:
+                blob.upload_blob(data, overwrite=True, etag=etag, match_condition=MatchConditions.IfNotModified)
+            return number
+        except METADATA_CONFLICT_ERRORS:
+            continue   # another run took a number meanwhile: read again
+    raise RuntimeError("the custom run counter kept changing")
+
+
+def _remove_blobs(container, names):
+    """Take back blobs this request created (a custom run that could not be completed). Best-effort."""
+    for name in names:
+        try:
+            container.delete_blob(name)
+        except Exception as e:
+            logging.warning(f"Could not remove a blob of an unfinished custom run: {type(e).__name__}")
 
 
 def _counted(amount, one, many):
@@ -2654,8 +2700,10 @@ def generate_custom_papers(req: func.HttpRequest) -> func.HttpResponse:
     `{files: [{fileName, url, description, expiration, size, date, packets,
     segments, pages}]}`. Cuts the selection (custom_papers.validate_selection)
     out of the generated packets, one PDF per selected day,
-    `judgingpapers_{YYYYMMDD}_custom{N}.pdf` with the next free N: nothing is
-    overwritten, and the full day PDF and ZIP are not touched. `generation` is
+    `judgingpapers_{YYYYMMDD}_custom{N}.pdf`, N being the run's number from
+    the record's counter (_next_custom_number: never given twice, also after
+    a delete). Nothing is overwritten, a run of several days is written whole
+    or not at all, and the full day PDF and ZIP are not touched. `generation` is
     the index's id the site drew its tree from; another index, or papers that
     are not the index's, is a 409 `papers_changed` and nothing is written.
     `contents` (default on; only a JSON false turns it off) puts the contents
@@ -2743,26 +2791,40 @@ def generate_custom_papers(req: func.HttpRequest) -> func.HttpResponse:
             cut.append((plan, output_path, pages))
             os.remove(zip_path)
 
-        # Upload under the next free number of the day; never over a file
-        taken = {}
+        # One number for the whole run (every day's PDF carries it), taken
+        # from the record's counter: never a number that was given before.
+        # Never over a file either (overwrite=False), and all days or none:
+        # when a name turns out to be taken, this run's uploads are removed
+        # and it starts again under the next number.
+        floor = 0
         for blob in container.list_blobs(name_starts_with=generated_prefix):
             match = _CUSTOM_FILE_RE.fullmatch(blob.name[len(generated_prefix):])
             if match:
-                taken[match.group(1)] = max(taken.get(match.group(1), 0), int(match.group(2)))
-        papers, details = [], []
-        for plan, output_path, pages in cut:
-            number = taken.get(plan["date"], 0) + 1
+                floor = max(floor, int(match.group(2)))
+        uploaded = []
+        try:
             for _attempt in range(CUSTOM_NAME_ATTEMPTS):
-                file_name = f"judgingpapers_{plan['date']}_custom{number}.pdf"
+                number = _next_custom_number(container, folder_path, floor)
                 try:
-                    with open(output_path, "rb") as data:
-                        container.upload_blob(name=generated_prefix + file_name, data=data, overwrite=False)
+                    for plan, output_path, _pages in cut:
+                        blob_name = f"{generated_prefix}judgingpapers_{plan['date']}_custom{number}.pdf"
+                        with open(output_path, "rb") as data:
+                            container.upload_blob(name=blob_name, data=data, overwrite=False)
+                        uploaded.append(blob_name)
                     break
                 except ResourceExistsError:
-                    number += 1
+                    _remove_blobs(container, uploaded)
+                    uploaded = []
+                    floor = max(floor, number)
             else:
-                return func.HttpResponse("Could not name the custom PDF, try again", status_code=409)
+                return func.HttpResponse("Could not name the custom PDFs, try again", status_code=409)
+        except Exception:
+            _remove_blobs(container, uploaded)
+            raise
 
+        papers, details = [], []
+        for plan, output_path, pages in cut:
+            file_name = f"judgingpapers_{plan['date']}_custom{number}.pdf"
             packets = len(plan["people"])
             description = (f"Custom papers {number}: {_counted(packets, 'packet', 'packets')}, "
                            f"{_counted(plan['segments'], 'segment', 'segments')}, "

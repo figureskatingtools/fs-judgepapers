@@ -279,9 +279,11 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
     "parts": [[prefix, role], …]}}}}`; `contents` (default on, only a JSON
     `false` turns it off) puts a contents page in front. One PDF per selected
     day, cut page by page out of the generated packets (so every sheet is the
-    full papers' own), named `judgingpapers_{YYYYMMDD}_custom{N}.pdf` with the
-    next free N: a generated file like the day PDF (listed, linkable,
-    sendable, deletable), and nothing is overwritten. **409**
+    full papers' own), named `judgingpapers_{YYYYMMDD}_custom{N}.pdf`, N being
+    the custom run's number (shared by the days of one run, never given
+    twice, also after a delete): a generated file like the day PDF (listed,
+    linkable, sendable, deletable); nothing is overwritten, and a run of
+    several days is written whole or not at all. **409**
     `papers_changed: …` when there is no index, the `generation` is another
     one or the stored papers are not the index's (the site prepares again);
     **400** `Invalid selection: <rule>` for a selection that doesn't fit the

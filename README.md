@@ -118,7 +118,7 @@ It works as generate → pick → cut. Every generate run also stores an index o
       "jon_judge": { "cover": false, "parts": [["FSKWSINGLES-KJUNIW----FNL0000100--", "judge"]] } } } } }
 ```
 
-- One PDF per selected day, `judgingpapers_{YYYYMMDD}_custom{N}.pdf`, with the next free number. It is a generated file like the day PDF (listed, linkable, sendable, deletable). The full day PDF and ZIP are never overwritten.
+- One PDF per selected day, `judgingpapers_{YYYYMMDD}_custom{N}.pdf`. N is the number of the custom run (all days of one run share it); a number is never used twice, also after its PDF was deleted, so an old download link never starts serving another selection. It is a generated file like the day PDF (listed, linkable, sendable, deletable). The full day PDF and ZIP are never overwritten.
 - Every page is the full papers' own: a personal cover lists the person's whole day, and a referee's calculation setup is in the segment where the full run put it.
 - `contents` (on unless `false`) puts a contents page in front: each person in print order with their roles, segments and the pages they hold in that PDF, so a supplement is easy to split and to check.
 - The papers must be the ones the tree was drawn from: otherwise the answer is 409 `papers_changed` and nothing is written.
