@@ -288,8 +288,9 @@ role (`_competition_for` / `_access_error`) **before** touching anything:
     one or the stored papers are not the index's (the site prepares again);
     **400** `Invalid selection: <rule>` for a selection that doesn't fit the
     index or has no pages (the message never names a person or a segment);
-    **413** over 512 KB; **503** when the index can't be read. A refusal
-    writes nothing.
+    **413** over 512 KB; **503** when the index can't be read or the PDFs
+    can't be recorded (the run is taken back). A refusal leaves nothing
+    behind.
 - `delete_file` refuses `metadata.json` and `init.md` (400 `Invalid filename`):
   they define the record and hold its settings.
 - A record with no `PlatformId` (pre-platform legacy) is **admin-only**.

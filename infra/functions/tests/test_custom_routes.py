@@ -566,6 +566,35 @@ def test_an_overlapping_run_never_leaves_an_index_that_passes_for_current(compet
     refused(blobs, tables, custom({DATE: {"schedule": True}}), 409, fa.PAPERS_CHANGED)
 
 
+def test_a_pdf_that_cannot_be_recorded_takes_the_whole_run_back(competition, blobs, tables):
+    competition["days"] = [(DATE, PEOPLE), (DAY2, PEOPLE2)]
+    generate()
+    index = current_index()
+    papers = tables["generatedpapers"]
+    recorded, real_upsert = [], papers.upsert_entity
+
+    def upsert(entity, mode=None):      # the table fails on the second day's row
+        if recorded:
+            raise RuntimeError("table storage")
+        recorded.append(entity["RowKey"])
+        real_upsert(entity, mode=mode)
+
+    papers.upsert_entity = upsert
+
+    response = custom(everything(index), generation=index["generation"])
+
+    # no PDF without its row, and no row without its run: both days are gone
+    assert recorded == [f"judgingpapers_{DATE}_custom1.pdf"]
+    refused(blobs, tables, response, 503, "Storage unavailable, try again")
+    assert not any("_custom" in key[1] for key in papers.rows)
+    # and the next run records as usual, under a new number
+    papers.upsert_entity = real_upsert
+    files = payload(custom(everything(index), generation=index["generation"]))["files"]
+    assert [made["fileName"] for made in files] == [f"judgingpapers_{DATE}_custom2.pdf",
+                                                    f"judgingpapers_{DAY2}_custom2.pdf"]
+    assert all(papers.row(COMP_ID, made["fileName"]) for made in files)
+
+
 def test_a_changed_second_day_leaves_no_file_of_the_first(competition, blobs, tables):
     competition["days"] = [(DATE, PEOPLE), (DAY2, PEOPLE2)]
     generate()

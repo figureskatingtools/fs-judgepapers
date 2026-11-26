@@ -900,17 +900,22 @@ def generate_blob_read_sas_url(blob_service_client, container_name, blob_name, s
     return f"{blob_url_base}?{sas_token}" if sas_token else None
 
 
-def store_generated_file(blob_name, competition, filename, file_size=0, description=None):
+def store_generated_file(blob_name, competition, filename, file_size=0, description=None, strict=False):
     """
     Record a generated file (merged PDF / ZIP) as a generatedpapers row: its
     blob name, never a link. Download links are minted per response, after
     the access check (_generated_file_links). REPLACE, so a row written by an
     older version loses its stored 5-day SAS URL when the file is regenerated.
     `description` replaces the default one (a custom PDF says what it holds).
+    Best-effort by default (a generate run records again on the next run);
+    `strict` raises instead: a custom PDF is written once, and without its
+    row it would never be listed, linked or sent.
     """
     try:
         table_client = get_table_client()
         if not table_client:
+            if strict:
+                raise RuntimeError("no table client")
             logging.warning("No table client available, generated file not recorded")
             return
 
@@ -932,6 +937,8 @@ def store_generated_file(blob_name, competition, filename, file_size=0, descript
         }, mode=UpdateMode.REPLACE)
         logging.info(f"Recorded generated file {filename}")
     except Exception as e:
+        if strict:
+            raise
         logging.error(f"Error recording generated file: {e}")
 
 
@@ -2585,6 +2592,16 @@ def _next_custom_number(container, folder_path, floor=0):
     raise RuntimeError("the custom run counter kept changing")
 
 
+def _remove_generated_rows(comp_id, file_names):
+    """Take back the generatedpapers rows of an unfinished custom run. Best-effort."""
+    for file_name in file_names:
+        try:
+            get_table_client().delete_entity(partition_key=comp_id, row_key=file_name)
+        except Exception as e:
+            if not isinstance(e, ResourceNotFoundError):
+                logging.warning(f"Could not remove a row of an unfinished custom run: {type(e).__name__}")
+
+
 def _remove_blobs(container, names):
     """Take back blobs this request created (a custom run that could not be completed). Best-effort."""
     for name in names:
@@ -2822,18 +2839,29 @@ def generate_custom_papers(req: func.HttpRequest) -> func.HttpResponse:
             _remove_blobs(container, uploaded)
             raise
 
+        # Record every PDF, strictly: a custom PDF without its generatedpapers
+        # row is never listed, linked or sent, and no later run writes the row.
+        # When one can't be recorded the whole run is taken back.
         papers, details = [], []
-        for plan, output_path, pages in cut:
-            file_name = f"judgingpapers_{plan['date']}_custom{number}.pdf"
-            packets = len(plan["people"])
-            description = (f"Custom papers {number}: {_counted(packets, 'packet', 'packets')}, "
-                           f"{_counted(plan['segments'], 'segment', 'segments')}, "
-                           f"{_counted(pages, 'page', 'pages')} (PDF)")
-            size = os.path.getsize(output_path)
-            store_generated_file(generated_prefix + file_name, comp_id, file_name, size, description=description)
-            papers.append({"BlobName": generated_prefix + file_name, "FileName": file_name,
-                           "Description": description, "FileSize": size})
-            details.append({"date": plan["date"], "packets": packets, "segments": plan["segments"], "pages": pages})
+        try:
+            for plan, output_path, pages in cut:
+                file_name = f"judgingpapers_{plan['date']}_custom{number}.pdf"
+                packets = len(plan["people"])
+                description = (f"Custom papers {number}: {_counted(packets, 'packet', 'packets')}, "
+                               f"{_counted(plan['segments'], 'segment', 'segments')}, "
+                               f"{_counted(pages, 'page', 'pages')} (PDF)")
+                size = os.path.getsize(output_path)
+                papers.append({"BlobName": generated_prefix + file_name, "FileName": file_name,
+                               "Description": description, "FileSize": size})
+                details.append({"date": plan["date"], "packets": packets, "segments": plan["segments"],
+                                "pages": pages})
+                store_generated_file(generated_prefix + file_name, comp_id, file_name, size,
+                                     description=description, strict=True)
+        except Exception as e:
+            logging.error(f"Could not record the custom papers of {comp_id}: {type(e).__name__}")
+            _remove_generated_rows(comp_id, [paper["FileName"] for paper in papers])
+            _remove_blobs(container, uploaded)
+            return func.HttpResponse(METADATA_UNAVAILABLE, status_code=503)
 
         total_pages = sum(detail["pages"] for detail in details)
         # The last selection, for "Last selection" / "Not in last selection"
