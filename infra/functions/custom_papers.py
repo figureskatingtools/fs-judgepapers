@@ -277,7 +277,8 @@ def plan_cut(index, chosen):
     What to cut for a validated selection: one plan per day with pages, in
     date order:
 
-      {date, title, zip, pages, segments, schedule: {file, pages, copies} | None,
+      {date, title, zip: {file, sha256, …}, pages, segments,
+       schedule: {file, pages, copies, sha256, …} | None,
        people: [{name, file, packet_pages, pages, ranges: [(first, stop)],
                  labels: [role label], segments: [prefix]}]}
 
@@ -469,14 +470,24 @@ def cut_day(zip_path, schedule_path, plan, output_path, contents_path=None):
     """
     Write a day plan's custom PDF: the contents page(s) when given, each
     person's selected pages from their packet in the day ZIP, then the
-    combined schedule's copies. Returns the page count. Raises PapersChanged
-    when a packet or the schedule is not what the index says (missing, or
-    another page count): never a PDF cut by wrong numbers.
+    combined schedule's copies. Returns the page count.
+
+    The files must be the ones the index describes, byte for byte: the day
+    ZIP and the schedule are checked against the plan's sha256 before a page
+    is read, so papers replaced meanwhile (another generate run), even by
+    ones with the same page counts, are never mixed into a custom PDF. Raises
+    PapersChanged for that, and for a packet that is missing or has another
+    page count: never a PDF cut by wrong numbers.
 
     Every packet repeats the fonts and the banner of its sheets, so the
     writer merges identical objects before writing; when that fails the PDF
     is written as it is.
     """
+    if file_sha256(zip_path) != plan["zip"]["sha256"]:
+        raise PapersChanged("the day ZIP is not the one the index describes")
+    if plan["schedule"] and file_sha256(schedule_path) != plan["schedule"]["sha256"]:
+        raise PapersChanged("the combined schedule is not the one the index describes")
+
     def assemble(compress):
         writer = PdfWriter()
         if contents_path:

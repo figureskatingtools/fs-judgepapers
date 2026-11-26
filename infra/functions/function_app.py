@@ -2554,6 +2554,7 @@ PAPERS_CHANGED = "papers_changed: the papers were generated again or changed; op
 _CUSTOM_FILE_RE = re.compile(r"judgingpapers_(\d{8})_custom(\d+)\.pdf")
 CUSTOM_NAME_ATTEMPTS = 5      # runs at another number when a name is taken after all
 CUSTOM_NUMBER_ATTEMPTS = 10   # conditional writes of the counter before giving up
+CUSTOM_RUN_METADATA = "customRun"   # blob metadata of a custom PDF: the id of the request that wrote it
 
 
 def _next_custom_number(container, folder_path, floor=0):
@@ -2602,11 +2603,39 @@ def _remove_generated_rows(comp_id, file_names):
                 logging.warning(f"Could not remove a row of an unfinished custom run: {type(e).__name__}")
 
 
-def _remove_blobs(container, names):
-    """Take back blobs this request created (a custom run that could not be completed). Best-effort."""
+def _own_custom_blob(container, name, run_id):
+    """
+    The ETag of blob `name` when the custom run `run_id` wrote it (its
+    CUSTOM_RUN_METADATA says so), else None: no such blob, or someone else's.
+    A storage error is raised.
+    """
+    try:
+        properties = container.get_blob_client(name).get_blob_properties()
+    except ResourceNotFoundError:
+        return None
+    if _meta(getattr(properties, "metadata", None), CUSTOM_RUN_METADATA) != run_id:
+        return None
+    return properties.etag
+
+
+def _remove_custom_blobs(container, names, run_id):
+    """
+    Take back the PDFs of a custom run that could not be completed. `names` is
+    every name the run *tried* to upload, because an upload whose answer was
+    lost may have landed all the same. Only a blob that carries this run's id
+    is removed, and only the version that was looked at (delete on its ETag):
+    a name that turned out to be someone else's is never touched. Best-effort:
+    a blob that can't be removed now has no generatedpapers row, so it is
+    never listed, linked or sent, its number is not given again, and it goes
+    with the competition's folder.
+    """
     for name in names:
         try:
-            container.delete_blob(name)
+            etag = _own_custom_blob(container, name, run_id)
+            if etag:
+                container.delete_blob(name, etag=etag, match_condition=MatchConditions.IfNotModified)
+        except ResourceNotFoundError:
+            pass
         except Exception as e:
             logging.warning(f"Could not remove a blob of an unfinished custom run: {type(e).__name__}")
 
@@ -2789,18 +2818,15 @@ def generate_custom_papers(req: func.HttpRequest) -> func.HttpResponse:
                             _internal_blob_name(folder_path, plan["schedule"]["file"])).readinto(f)
             except ResourceNotFoundError:
                 return func.HttpResponse(PAPERS_CHANGED, status_code=409)
-            # The bytes must be the index's: a ZIP or a schedule replaced
-            # meanwhile (another run) would be cut by the wrong page numbers
-            if custom_papers.file_sha256(zip_path) != plan["zip"]["sha256"]:
-                return func.HttpResponse(PAPERS_CHANGED, status_code=409)
-            if schedule_path and custom_papers.file_sha256(schedule_path) != plan["schedule"]["sha256"]:
-                return func.HttpResponse(PAPERS_CHANGED, status_code=409)
 
             contents_path = None
             if with_contents:
                 contents_path = os.path.join(temp_dir, f"{date}-contents.pdf")
                 custom_papers.create_contents_pdf(contents_path, index, plan)
             output_path = os.path.join(temp_dir, f"{date}-custom.pdf")
+            # cut_day checks the bytes first (sha256 of the ZIP and of the
+            # schedule against the index): a file replaced meanwhile by
+            # another run would be cut by the wrong page numbers
             try:
                 pages = custom_papers.cut_day(zip_path, schedule_path, plan, output_path, contents_path)
             except custom_papers.PapersChanged:
@@ -2811,32 +2837,49 @@ def generate_custom_papers(req: func.HttpRequest) -> func.HttpResponse:
         # One number for the whole run (every day's PDF carries it), taken
         # from the record's counter: never a number that was given before.
         # Never over a file either (overwrite=False), and all days or none:
-        # when a name turns out to be taken, this run's uploads are removed
-        # and it starts again under the next number.
+        # when a name turns out to be someone else's, this run's uploads are
+        # removed and it starts again under the next number.
+        #
+        # Every PDF carries this request's id as blob metadata, and a name is
+        # noted before its upload is sent: an upload can land although its
+        # answer never arrives, so "it raised" does not mean "nothing was
+        # written". Taking a run back therefore looks at every name it tried
+        # and removes exactly the blobs that carry its id (_remove_custom_blobs).
         floor = 0
         for blob in container.list_blobs(name_starts_with=generated_prefix):
             match = _CUSTOM_FILE_RE.fullmatch(blob.name[len(generated_prefix):])
             if match:
                 floor = max(floor, int(match.group(2)))
-        uploaded = []
+        run_id = uuid4().hex
+        attempted = []
         try:
             for _attempt in range(CUSTOM_NAME_ATTEMPTS):
                 number = _next_custom_number(container, folder_path, floor)
-                try:
-                    for plan, output_path, _pages in cut:
-                        blob_name = f"{generated_prefix}judgingpapers_{plan['date']}_custom{number}.pdf"
+                name_taken = False
+                for plan, output_path, _pages in cut:
+                    blob_name = f"{generated_prefix}judgingpapers_{plan['date']}_custom{number}.pdf"
+                    attempted.append(blob_name)
+                    try:
                         with open(output_path, "rb") as data:
-                            container.upload_blob(name=blob_name, data=data, overwrite=False)
-                        uploaded.append(blob_name)
+                            container.upload_blob(name=blob_name, data=data, overwrite=False,
+                                                  metadata={CUSTOM_RUN_METADATA: run_id})
+                    except ResourceExistsError:
+                        # Taken: by this very upload when its first answer was
+                        # lost and the SDK sent it again (the blob carries this
+                        # request's id, and is whole: a blob appears only once
+                        # it is committed), or by someone else
+                        if not _own_custom_blob(container, blob_name, run_id):
+                            name_taken = True
+                            break
+                if not name_taken:
                     break
-                except ResourceExistsError:
-                    _remove_blobs(container, uploaded)
-                    uploaded = []
-                    floor = max(floor, number)
+                _remove_custom_blobs(container, attempted, run_id)
+                attempted = []
+                floor = max(floor, number)
             else:
                 return func.HttpResponse("Could not name the custom PDFs, try again", status_code=409)
         except Exception:
-            _remove_blobs(container, uploaded)
+            _remove_custom_blobs(container, attempted, run_id)
             raise
 
         # Record every PDF, strictly: a custom PDF without its generatedpapers
@@ -2860,7 +2903,7 @@ def generate_custom_papers(req: func.HttpRequest) -> func.HttpResponse:
         except Exception as e:
             logging.error(f"Could not record the custom papers of {comp_id}: {type(e).__name__}")
             _remove_generated_rows(comp_id, [paper["FileName"] for paper in papers])
-            _remove_blobs(container, uploaded)
+            _remove_custom_blobs(container, attempted, run_id)
             return func.HttpResponse(METADATA_UNAVAILABLE, status_code=503)
 
         total_pages = sum(detail["pages"] for detail in details)

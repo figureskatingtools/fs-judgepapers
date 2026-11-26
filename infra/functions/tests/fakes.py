@@ -19,7 +19,8 @@ routes depend on:
     `ResourceExistsError` with overwrite=False (the SDK converts it); without
     conditions, overwrite=False on an existing blob raises `ResourceExistsError`.
     `before_upload(name)` on the container, when set, runs first on every
-    upload: a test's stand-in for a concurrent writer.
+    upload: a test's stand-in for a concurrent writer. `delete_blob` honours
+    `etag` + `MatchConditions.IfNotModified` (`ResourceModifiedError`).
 """
 import itertools
 import re
@@ -249,9 +250,11 @@ class FakeContainerClient:
                 for name, blob in sorted(self.blobs.items())
                 if not name_starts_with or name.startswith(name_starts_with)]
 
-    def delete_blob(self, name):
+    def delete_blob(self, name, etag=None, match_condition=None, **kwargs):
         if name not in self.blobs:
             raise ResourceNotFoundError("blob not found")
+        if match_condition == MatchConditions.IfNotModified and self.blobs[name].etag != etag:
+            raise ResourceModifiedError("The condition specified using HTTP conditional header(s) is not met.")
         del self.blobs[name]
 
     def download_blob(self, name):

@@ -10,6 +10,7 @@ import json
 import os
 
 import pytest
+from azure.core.exceptions import ResourceExistsError, ServiceResponseError
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
 
@@ -458,6 +459,76 @@ def test_a_name_taken_meanwhile_is_skipped(competition, blobs):
 
     assert made["fileName"] == f"judgingpapers_{DATE}_custom2.pdf"
     assert blobs.blobs[taken].data == b"%PDF-theirs"
+
+
+def losing_the_answer(blobs, match, error):
+    """Uploads of a matching name are stored and then raise: their answer never arrives."""
+    real_upload = blobs.upload_blob
+
+    def upload(name, data, **kwargs):
+        made = real_upload(name, data, **kwargs)
+        if match(name):
+            raise error
+        return made
+
+    blobs.upload_blob = upload
+
+
+def test_an_upload_that_landed_without_its_answer_is_taken_back(competition, blobs, tables):
+    competition["days"] = [(DATE, PEOPLE), (DAY2, PEOPLE2)]
+    generate()
+    index = current_index()
+    # the second day's PDF is stored, but the request fails on its way back
+    losing_the_answer(blobs, lambda name: f"judgingpapers_{DAY2}_custom" in name,
+                      ServiceResponseError("connection reset"))
+
+    response = custom(everything(index))
+
+    # no PDF is left without a row: neither that one nor the first day's
+    refused(blobs, tables, response, 500, "Error processing request. Check server logs for details.")
+    assert not any("_custom" in key[1] for key in tables["generatedpapers"].rows)
+
+
+def test_an_upload_the_sdk_sent_twice_is_the_run_s_own(competition, blobs, tables):
+    generate()
+    index = current_index()
+    # the first answer is lost, the SDK sends the upload again and is told the blob exists
+    losing_the_answer(blobs, lambda name: "_custom" in name,
+                      ResourceExistsError("The specified blob already exists."))
+
+    made, = payload(custom(segment_only(index, FS)))["files"]
+
+    # the blob carries this run's id, so it is the run's PDF: no second number, no second file
+    name = f"{FOLDER}/judgePapers/judgingpapers_{DATE}_custom1.pdf"
+    assert made["fileName"] == f"judgingpapers_{DATE}_custom1.pdf"
+    assert [blob for blob in blobs.blobs if "_custom" in blob] == [name]
+    assert blob_texts(blobs, name)[1:] == [
+        "anna_judge 5", "anna_judge 6", "bert_referee 6", "bert_referee 7", "bert_referee 8"]
+    assert tables["generatedpapers"].row(COMP_ID, made["fileName"])["BlobName"] == name
+    assert json.loads(blobs.blobs[COUNTER_BLOB].data) == {"last": 1}
+
+
+def test_taking_a_run_back_removes_only_its_own_blobs(blobs):
+    mine, theirs, plain, gone = (f"{FOLDER}/judgePapers/judgingpapers_{DATE}_custom{n}.pdf" for n in (1, 2, 3, 4))
+    blobs.upload_blob(mine, b"%PDF-mine", metadata={fa.CUSTOM_RUN_METADATA.lower(): "run-a"})   # any case of the key
+    blobs.upload_blob(theirs, b"%PDF-theirs", metadata={fa.CUSTOM_RUN_METADATA: "run-b"})
+    blobs.upload_blob(plain, b"%PDF-plain")
+
+    fa._remove_custom_blobs(blobs, [mine, theirs, plain, gone], "run-a")
+
+    assert sorted(blobs.blobs) == [theirs, plain]
+
+
+def test_taking_a_run_back_removes_only_the_version_it_looked_at(blobs, monkeypatch):
+    name = f"{FOLDER}/judgePapers/judgingpapers_{DATE}_custom1.pdf"
+    blobs.upload_blob(name, b"%PDF-mine", metadata={fa.CUSTOM_RUN_METADATA: "run-a"})
+    looked_at = blobs.blobs[name].etag
+    blobs.upload_blob(name, b"%PDF-later", overwrite=True)     # replaced between the look and the delete
+    monkeypatch.setattr(fa, "_own_custom_blob", lambda *args: looked_at)
+
+    fa._remove_custom_blobs(blobs, [name], "run-a")
+
+    assert blobs.blobs[name].data == b"%PDF-later"
 
 
 def test_one_pdf_per_selected_day(competition, blobs):

@@ -459,6 +459,34 @@ def test_another_schedule_stops_the_cut(papers):
         cut(papers, everything(index))
 
 
+def test_a_schedule_of_as_many_pages_but_other_bytes_stops_the_cut(papers):
+    # another run's schedule: the page count says nothing, only the bytes do
+    index, out, internal = papers
+    text_pdf(internal / f"combinedschedule_{DATE}.pdf", [f"other {n}" for n in range(1, SCHEDULE_PAGES + 1)])
+
+    with pytest.raises(PapersChanged):
+        cut(papers, everything(index))
+    assert not (out / "custom.pdf").exists()
+    # without the schedule ticked the same papers are cut as usual
+    _path, pages, _plan = cut(papers, segment_only(index, FS))
+    assert pages
+
+
+def test_a_zip_with_other_bytes_stops_the_cut(papers):
+    # the same packets zipped again: every page count matches, the bytes don't
+    index, out, _ = papers
+    path = out / index["days"][0]["zip"]["file"]
+    with zipfile.ZipFile(path) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+    with pytest.raises(PapersChanged):
+        cut(papers, segment_only(index, FS))
+    assert not (out / "custom.pdf").exists()
+
+
 def test_the_pdf_is_written_even_when_identical_objects_cannot_be_merged(papers, monkeypatch, capsys):
     def refuse(self, *args, **kwargs):
         raise RuntimeError("no")
