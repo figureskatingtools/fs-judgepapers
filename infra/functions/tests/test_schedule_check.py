@@ -1,7 +1,10 @@
 """schedule_check — which segments of the CompetitionSchedule have papers among
 the uploads (issue #84) — and get_competition_details' `scheduleCheck`."""
+import io
+
 import pytest
 
+from competition_schedule import parse_competition_schedule
 from schedule_check import check_schedule, start_list_title
 from test_category_names import PREFIX, details, sheet_pdf  # noqa: F401
 from test_combined_schedule import PARAMS_FS, FS_ROWS, make_start_list
@@ -138,6 +141,31 @@ def test_a_missing_row_gets_the_card_of_its_category():
     assert [r["categoryKey"] for r in result] == [
         "SM-JUNIORIT Naiset", "SM-JUNIORIT Naiset", "A-Silmut, Tytöt", "JUNIORIT #2", None, None]
     assert [r["status"] for r in result] == ["found"] + ["missing"] * 5
+
+
+@pytest.mark.parametrize("keys", [["JUNIORIT #1", "JUNIORIT"], ["JUNIORIT", "JUNIORIT #1"]],
+                         ids=["split card first", "exact card first"])
+def test_a_card_of_exactly_that_name_wins_over_a_split_group(keys):
+    result = check_schedule([row("20260911", "17:00", "Juniorit", "Free Skating")], [], keys)
+    assert [r["categoryKey"] for r in result] == ["JUNIORIT"]
+
+
+@pytest.mark.parametrize("keys", [["JUNIORIT #2", "JUNIORIT #1"], ["JUNIORIT #1", "JUNIORIT #2"]],
+                         ids=["group 2 first", "group 1 first"])
+def test_a_bare_name_among_split_groups_goes_to_the_lowest_whatever_the_order(keys):
+    result = check_schedule([row("20260911", "17:00", "Juniorit", "Free Skating")], [], keys)
+    assert [r["categoryKey"] for r in result] == ["JUNIORIT #1"]
+
+
+def test_a_numbered_segment_printed_as_one_string_still_finds_its_card():
+    # No table row for the printed category: the split rests on the segment name alone
+    data = make_schedule(
+        [("12.09.2026", [("10:00:00", "10:30:00", 6, "JUNIORDAMER", "FREE SKATING 2")])], single_spaced=True)
+    rows = parse_competition_schedule(io.BytesIO(data), [])
+    assert [(r["category_name"], r["segment_name"]) for r in rows] == [("JUNIORDAMER", "FREE SKATING 2")]
+
+    result = check_schedule(rows, [], ["Juniordamer"])
+    assert [(r["status"], r["categoryKey"]) for r in result] == [("missing", "Juniordamer")]
 
 
 def test_no_rows_no_result():

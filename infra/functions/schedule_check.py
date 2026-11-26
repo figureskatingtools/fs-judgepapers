@@ -103,11 +103,17 @@ def check_schedule(rows, segments, category_keys=()):
         category = _folded(row.get("category_name"))
         if seg and seg.get("categoryKey") and category:
             cards.setdefault(category, seg["categoryKey"])
+    # A card's own name first. A split group's bare name ('JUNIORIT' for
+    # 'JUNIORIT #1') stands in only where no card is called exactly that, and
+    # then for the lowest group, whatever order the cards come in.
     keys_by_name = {}
     for key in category_keys:
-        for name in (key, _TRAILING_SPLIT_MARK_RE.sub("", key or "")):
-            if _folded(name):
-                keys_by_name.setdefault(_folded(name), key)
+        if _folded(key):
+            keys_by_name.setdefault(_folded(key), key)
+    for key in sorted(k for k in category_keys if k):
+        bare = _folded(_TRAILING_SPLIT_MARK_RE.sub("", key))
+        if bare:
+            keys_by_name.setdefault(bare, key)
 
     result = []
     for row, seg in zip(rows, matched):
